@@ -1338,3 +1338,318 @@ PYTHONDONTWRITEBYTECODE=1 uv run pytest
 There is deliberately no dependency sync, Git command, `python -m gitpane.app`,
 `textual run`, `run_test()`, Pilot, app, terminal UI, editor, browser, or smoke
 verification command. The user owns visual confirmation after implementation.
+
+
+# Milestone 6: Accessible Textual theme
+
+## Goal
+
+Theme the existing Textual interface with one restrained, semantic dark palette
+that makes the current sidebar, list focus/highlight states, and unified diff
+easy to distinguish. Additions remain green and removals remain red, while the
+dark change backgrounds continue to allow Rich syntax foregrounds to show
+through unchanged. The milestone is complete when the palette and state rules
+are covered by non-interactive static/helper tests and all project checks pass.
+
+Repository baseline: Milestones 1 through 5 are complete. `gitpane/app.tcss`
+currently contains sizing and scrolling rules only. `gitpane/app.py` renders
+context rows without an explicit background, applies named `green`/`red`
+backgrounds to complete changed rows, and preserves Rich syntax foregrounds on
+context/addition content. `tests/test_app.py` already verifies the renderer's
+plain text, syntax spans, and complete-row backgrounds without running Textual.
+
+## Scope boundary
+
+### In scope
+
+- A fixed semantic dark palette for the existing app canvas, sidebar, section
+  labels, lists, diff pane, text, muted text, borders, focus indication, hover,
+  inactive highlight, and focused highlight.
+- Styling only the widgets already composed by `GitPaneApp`; selectors may use
+  the existing IDs and Textual's existing `ListItem` highlight/focus states.
+- A visible distinction between the highlighted row in the focused list and a
+  highlight retained in the inactive list.
+- Dark green and dark red complete-row backgrounds for additions and removals,
+  respectively, with context on the neutral diff canvas.
+- Keeping changed-row styles background-only so inherited/plain text and Rich
+  syntax foreground colors are not replaced.
+- Focused static tests for locked palette contrast and required TCSS state
+  selectors, plus the existing direct renderer tests for Rich style behavior.
+
+### Out of scope
+
+- A theme picker, light theme, terminal-color detection, user configuration,
+  environment variables, theme persistence, or runtime theme switching.
+- New widgets, layout restructuring, changed dimensions, a header/footer,
+  icons, dialogs, notifications, command palette, help UI, or animations.
+- Changes to labels, bindings, focus movement, selection behavior, scrolling,
+  staging/unstaging, status refresh, Git/diff/model behavior, or error handling.
+- Any change to source reconstruction, lexer selection, `Syntax` construction,
+  token styles, syntax theme, syntax projection, or syntax tests except updating
+  expected diff background colors and proving foregrounds remain intact.
+- File watching, automatic refresh, debounce, selection restoration, caching,
+  workers/threading, or any Step 6 watcher work from `docs/design-spec.md`.
+- New dependencies or changes to `pyproject.toml`, `uv.lock`, package metadata,
+  `gitpane/git.py`, `gitpane/diff.py`, `gitpane/model.py`, or
+  `gitpane/__init__.py`.
+- App/Pilot/event-loop tests, snapshots, terminal capture, browser/editor/app
+  launches, visual smoke checks, Git invocation from tests, or temporary repos.
+- Editing, reverting, staging, formatting, or otherwise touching the authorized
+  uncommitted `README.md` change.
+
+## Locked decisions
+
+| Area | Decision |
+| --- | --- |
+| Owned implementation files | Implementation may edit only `gitpane/app.tcss`, `gitpane/app.py`, and `tests/test_app.py`, and may create `tests/test_theme.py`. Do not edit dependencies, lockfiles, other source/tests, or documentation during a story. The orchestrator alone updates this status table. |
+| Palette | Define and use these exact semantic TCSS variables: canvas `#0d1117`, surface `#161b22`, raised surface `#21262d`, inactive selection `#30363d`, text `#f0f3f6`, muted text `#b1bac4`, border `#6e7681`, accent `#58a6ff`, focus `#f2cc60`, focused selection `#174ea6`, addition background `#142b1d`, and removal background `#351b20`. Use lowercase hex consistently. Do not use ANSI color names, automatic color transforms, opacity, gradients, or Textual's host-theme values. |
+| Accessibility floor | Treat WCAG relative luminance as the static planning metric. Every locked normal-text pair must be at least `4.5:1`: text/canvas, text/surface, muted/surface, text/raised surface, text/inactive selection, text/focused selection, text/addition, and text/removal. Focus, accent, and border against their adjacent dark surfaces must be at least `3:1` as non-text indicators. The app remains terminal software, so these checks validate the authored RGB palette rather than claiming a terminal or end-user display conformance result. |
+| Palette ownership | Keep TCSS variables in `gitpane/app.tcss`; do not register a Textual `Theme`, add Python theme state, duplicate the full palette in production Python, or create a palette/config module. The two Rich diff background literals necessarily also appear in `gitpane/app.py`; `tests/test_theme.py` statically guards that those literals match the TCSS variables. |
+| Existing layout | Retain `#body` height, the sidebar's exact width/min/max of `30`, both lists' `1fr` heights, both-axis diff scrolling, and the diff's auto width/no-wrap behavior. Theme rules are additive to those contracts; do not calculate dimensions in Python or change the widget tree. Horizontal-only diff padding of one cell is allowed; no vertical padding may be added because the first-change scroll index maps directly to rendered rows. |
+| App surfaces | Apply canvas/text to the app screen/body and diff area, surface to `#sidebar` and both lists, raised surface plus muted bold text to the two direct `Static` section labels under `#sidebar`, and the border color to neutral list/sidebar separation. Keep the selected diff's context rows on the neutral canvas. Do not add alternating rows or syntax styling to labels, paths, gutters, or headings. |
+| List state hierarchy | An ordinary item uses text on surface. Hover uses raised surface without changing focus. `ListView > ListItem.--highlight` uses text on inactive-selection background so a retained highlight remains visible. `ListView:focus` gets the focus-colored border, and `ListView:focus > ListItem.--highlight` uses text on focused-selection background with bold text. The focused selector must be more specific and declared after inactive highlight/hover so it wins. Do not replace `ListView`/`ListItem`, add classes in Python, or infer focus in application state. |
+| Diff meaning | Replace only the existing renderer backgrounds: addition becomes `#142b1d` and removal becomes `#351b20`. Keep `+`/`-` markers and full-row background ranges exactly as they are. These are deliberately tinted green/red, not a generic selection/accent color, so the established diff meaning remains redundant in both marker and hue. Context receives no Rich background style. |
+| Syntax compatibility | Construct changed-row Rich `Style` values with `bgcolor` only: never set `color`, `bold`, `dim`, or a syntax theme in Python. Continue applying the row background after content composition so it replaces any syntax background while retaining token foreground spans. Do not modify `reconstruct_new_source`, `lexer_for_entry`, `highlight_new_lines`, compact row indexing, or `Syntax` defaults. The dark tints are chosen to remain compatible with the current bright default syntax foregrounds; tests must use controlled foreground spans rather than pinning Pygments/Rich's version-specific palette. |
+| Static test seam | Create `tests/test_theme.py` with no Textual imports. Read `gitpane/app.tcss` as text, use small test-only extraction helpers (regular expressions or bounded string parsing), and assert the exact semantic variable values, their use in the required selectors, the required inactive/focused highlight selectors, focused-rule ordering, retained layout declarations, and absence of vertical diff padding. Add a small test-only sRGB luminance/contrast helper and assert the locked pair thresholds. Do not build a general TCSS parser or test Textual itself. |
+| Renderer test seam | Continue calling `render_diff_rows` directly in `tests/test_app.py`. Update exact background span expectations to the two locked hex colors. Retain controlled cyan/magenta syntax foreground assertions and additionally assert the changed-row diff `Style` has no foreground, proving the background overlay does not replace token colors. Do not construct widgets/events or instantiate/run `GitPaneApp`. |
+| Dependencies | Use only existing Textual/Rich behavior and Python's standard library in tests. Do not add a color, accessibility, CSS parsing, snapshot, or Textual testing package, and do not regenerate `uv.lock`. |
+
+## Story execution rules
+
+Each story must be dispatched with its specification, this milestone's full
+scope and locked decisions, exact paths, and the Required Coder-Prompt Rules
+from `docs/workflow.md`: **Do NOT boot the editor/application or run any
+browser/smoke test.** **NEVER use `git stash`, `git checkout --`, or `git
+restore` on any file not intentionally edited for this task; if something
+unexpected changes, stop and report it.** Escalate unresolved architectural
+decisions to the senior coder rather than guessing. Use
+`PYTHONDONTWRITEBYTECODE=1` for Python checks. A coder must not start another
+story, commit, update this status table, or touch `README.md`. Verification must
+not call `App.run()`, `App.run_test()`, use a Pilot/event loop, invoke
+`python -m gitpane.app`/`textual run`, or perform a terminal, app, browser,
+editor, or smoke check.
+
+## Story status
+
+| Story | Title | Status |
+| --- | --- | --- |
+| 1 | Theme the app shell and list states | Complete |
+| 2 | Theme diff rows without replacing syntax foregrounds | Pending |
+| 3 | Final cleanup and milestone verification | Pending |
+
+## Story 1: Theme the app shell and list states
+
+### Files
+
+- Edit `gitpane/app.tcss`.
+- Create `tests/test_theme.py`.
+- Do not edit `gitpane/app.py`, `tests/test_app.py`, `README.md`, or any other
+  file.
+
+### Work
+
+1. Add the exact locked semantic variables at the start of `gitpane/app.tcss`.
+   Preserve every existing layout declaration and keep all sizing in TCSS.
+2. Add rules for the existing screen/body, sidebar, its two direct `Static`
+   labels, both existing lists, and the diff scroll/static. Use only existing
+   widget types and IDs; no Python composition hook is needed.
+3. Implement the locked list hierarchy for ordinary, hover, inactive
+   `.--highlight`, focused-list border, and focused `.--highlight` states.
+   Declare the focused-highlight rule last among item states so focus is
+   visually unambiguous even when both lists retain a highlighted row.
+4. Keep the sidebar exactly 30 columns and each list at `1fr`. Keep horizontal
+   and vertical diff scrolling, `width: auto`, and `text-wrap: nowrap`. If
+   padding the diff text, use exactly `padding: 0 1` so row-index scrolling is
+   not shifted vertically.
+5. Add a focused static test module. Its small extraction helpers should read
+   the stylesheet relative to the repository test file, recover only the
+   semantic variables/rules needed by this milestone, and fail clearly when a
+   locked value, selector, ordering rule, or retained layout declaration
+   drifts. Do not import Textual or attempt a complete TCSS grammar.
+6. Implement WCAG sRGB relative-luminance and contrast-ratio calculations as
+   test-only helpers and parameterize the exact locked text and indicator
+   pairs. Assert `>= 4.5` for normal text and `>= 3.0` for indicators. Keep the
+   helper private to the test; production code does not need color math.
+7. Do not change diff renderer colors yet. The addition/removal TCSS variables
+   are defined and statically checked now, while Python renderer integration is
+   isolated to Story 2.
+
+### Acceptance criteria
+
+- The current widget tree has a coherent dark canvas/surface hierarchy without
+  adding or changing any widget, ID, behavior, or dimension.
+- Sidebar section labels, normal rows, hover, inactive highlight, focused list,
+  and focused highlight each have the exact locked semantic treatment.
+- Keyboard focus is indicated by both a focus border and a distinct focused-row
+  fill; an inactive list's highlight remains visible but is not confused with
+  focus.
+- The locked normal text pairs meet `4.5:1`, and focus/accent/border indicators
+  meet `3:1`, as verified from authored sRGB values by pure tests.
+- Existing 30-column/list-height/diff-scroll/no-wrap contracts remain present,
+  and no vertical padding invalidates first-change scrolling.
+- Tests are static/pure only: no app, Textual import, Pilot, event loop,
+  snapshot, terminal, browser, editor, or smoke process is used.
+- `README.md` remains exactly as found.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_theme.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check tests/test_theme.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check tests/test_theme.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy tests/test_theme.py
+git diff --check -- gitpane/app.tcss tests/test_theme.py
+git status --short
+```
+
+Do not run `python -m gitpane.app`, `textual run`, `run_test()`, a Pilot, or any
+app/terminal/browser/editor/smoke check. `git status --short` is expected to
+continue showing the authorized `README.md` edit; do not alter it.
+
+## Story 2: Theme diff rows without replacing syntax foregrounds
+
+### Files
+
+- Edit `gitpane/app.py`.
+- Edit `tests/test_app.py`.
+- Edit `tests/test_theme.py` only if needed to complete the already specified
+  static agreement check between TCSS and renderer colors.
+- Do not edit `gitpane/app.tcss`, `README.md`, or any other file.
+
+### Work
+
+1. In `render_diff_rows`, replace named `green` and `red` backgrounds with the
+   exact locked addition and removal hex values. Keep the small kind-to-`Style`
+   mapping and every row composition/indexing step otherwise unchanged; do not
+   introduce a theme class, renderer options, or a second rendering path.
+2. Construct both styles with `bgcolor` only and continue stylizing each full
+   changed row after gutter/content assembly. Do not assign a foreground or
+   alter context styling, markers, line-number formatting, syntax helpers,
+   selected-entry flow, or compact new-side indexing.
+3. Update existing exact renderer assertions in `tests/test_app.py` from named
+   backgrounds to `Style(bgcolor="#142b1d")` and
+   `Style(bgcolor="#351b20")`. Preserve every exact plain-output and span-range
+   assertion.
+4. Strengthen the controlled syntax-projection test without depending on the
+   installed Rich/Pygments theme: assert cyan/magenta content foreground spans
+   still coexist with the new backgrounds, gutters have no syntax foreground,
+   removals remain syntax-plain, context has no diff background, and each diff
+   style's `color` is `None`.
+5. Complete the static agreement assertion in `tests/test_theme.py`: extract the
+   two locked TCSS diff variables and the renderer's resulting styles through a
+   direct `render_diff_rows` call with literal rows. Compare normalized Rich
+   background color values, not source-code text or Rich's syntax theme.
+6. Run only helper/static tests and checks. Do not instantiate a widget or app,
+   fabricate events, invoke Git, inspect a real terminal rendering, or change
+   syntax/highlighting behavior.
+
+### Acceptance criteria
+
+- Addition rows use the locked dark green background and removal rows use the
+  locked dark red background across the complete row; `+`/`-` markers continue
+  to provide a non-color cue.
+- Context remains neutral and readable on the diff canvas, with no Rich diff
+  background span.
+- Changed-row diff styles contain no foreground, so controlled Rich syntax
+  foregrounds remain present on context/addition content and removal content
+  remains syntax-plain.
+- Plain output, gutters, row ranges, newline behavior, source reconstruction,
+  lexer selection, highlighting, projection, selection, and scrolling are
+  unchanged.
+- Static/helper tests prove exact TCSS/renderer color agreement and Rich span
+  behavior without pinning Rich/Pygments token colors or running Textual.
+- No watcher, dependency, metadata, lockfile, unrelated source/test, or
+  `README.md` change is introduced.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py tests/test_theme.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py tests/test_theme.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py tests/test_theme.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py tests/test_theme.py
+git diff --check -- gitpane/app.py tests/test_app.py tests/test_theme.py
+git status --short
+```
+
+Do not run `python -m gitpane.app`, `textual run`, `run_test()`, a Pilot, Git
+operations from tests, or any app/terminal/browser/editor/smoke check. Leave the
+authorized `README.md` edit untouched.
+
+## Story 3: Final cleanup and milestone verification
+
+### Files
+
+- Review and, only when a Milestone 6 fix is required, edit
+  `gitpane/app.tcss`.
+- Review and, only when a Milestone 6 fix is required, edit `gitpane/app.py`.
+- Review and, only when a Milestone 6 fix is required, edit
+  `tests/test_app.py`.
+- Review and, only when a Milestone 6 fix is required, edit
+  `tests/test_theme.py`.
+- Do not modify `README.md`, dependencies, lockfiles, documentation, or any
+  other source/test file; status-table updates and commits remain the
+  orchestrator's responsibility.
+
+### Work
+
+1. Review the complete Milestone 6 diff for exact palette use, accidental
+   hard-coded alternatives, selector precedence, inaccessible state pairs,
+   changed dimensions, vertical diff padding, duplicate theme state, stale
+   imports, debug output, and work outside the scope boundary.
+2. Confirm the focused-list border and focused-highlight selector are visibly
+   stronger and more specific than hover/inactive highlight, while both lists
+   remain independently navigable using Textual's existing state classes.
+3. Confirm additions are still green and removals red, both retain marker cues,
+   context is neutral, and renderer styles set only backgrounds after syntax
+   content is composed. Do not alter the syntax theme or any syntax/watcher
+   helper while cleaning up.
+4. Confirm `tests/test_theme.py` remains a small static/pure contract test rather
+   than a general parser and that `tests/test_app.py` tests only helper output
+   and controlled Rich spans. No test may construct/run the app, use Pilot,
+   invoke Git/subprocesses, create a repository, or claim to verify terminal
+   display output.
+5. Apply only fixes needed for this milestone, then run the full static and unit
+   checks below once with bytecode writing disabled. Do not add dependency sync,
+   application launch, Textual CSS preview, browser, editor, terminal capture,
+   or smoke verification.
+6. Inspect the owned-file diff for unintended files and generated artifacts.
+   `README.md` is expected to remain modified by the user; stop and report any
+   other unexpected change rather than using destructive Git commands.
+7. Leave this status table and all commits to the orchestrator as required by
+   `docs/workflow.md`.
+
+### Acceptance criteria
+
+- All Milestone 6 and prior acceptance criteria hold together.
+- The implementation is the smallest clear theme for the current UI: one TCSS
+  palette and state hierarchy plus two background-literal changes in the
+  existing renderer, with no runtime theme system or new abstraction.
+- Authored text/state contrast passes the locked pure checks, and exact TCSS/
+  renderer addition/removal colors agree.
+- Existing UI layout and behavior, Rich syntax foregrounds, syntax helpers,
+  list interaction, diff scrolling, Git operations, and manual refresh remain
+  unchanged; no watcher work has started.
+- Ruff formatting/lint, strict mypy, and the complete pytest suite pass.
+- Tests remain helper/static only, and no app/Pilot/event loop, Git subprocess,
+  temporary repo, browser, editor, terminal UI, or smoke process is run.
+- Only `gitpane/app.tcss`, `gitpane/app.py`, `tests/test_app.py`, and
+  `tests/test_theme.py` are implementation/test changes, and the authorized
+  `README.md` edit remains byte-for-byte untouched.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run pytest
+git diff --check -- gitpane/app.tcss gitpane/app.py tests/test_app.py tests/test_theme.py
+git status --short
+```
+
+There is deliberately no dependency sync, `python -m gitpane.app`, `textual
+run`, `run_test()`, Pilot, app, terminal UI, editor, browser, visual snapshot,
+or smoke verification command. The user owns visual confirmation after the
+milestone is implemented. The pre-existing `README.md` modification is
+authorized user work and must remain untouched.
