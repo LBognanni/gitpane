@@ -1778,7 +1778,7 @@ browser, editor, or smoke check.
 | Story | Title | Status |
 | --- | --- | --- |
 | 1 | Extract and cache the prepared diff view | Complete |
-| 2 | Load diffs on a worker with a request-generation guard | Pending |
+| 2 | Load diffs on a worker with a request-generation guard | Complete |
 | 3 | Final cleanup and milestone verification | Pending |
 
 ## Story 1: Extract and cache the prepared diff view
