@@ -52,7 +52,7 @@ Repository baseline: the repository currently contains documentation only. It ha
 | 1 | Bootstrap the Python package and toolchain | Complete |
 | 2 | Add the repository status model | Complete |
 | 3 | Parse and print repository status | Complete |
-| 4 | Final cleanup and milestone verification | Pending |
+| 4 | Final cleanup and milestone verification | Complete |
 
 ## Story 1: Bootstrap the Python package and toolchain
 
