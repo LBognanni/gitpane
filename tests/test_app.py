@@ -5,11 +5,13 @@ from rich.style import Style
 from rich.text import Text
 
 from gitpane.app import (
+    DiffView,
+    build_diff_view,
     format_file_label,
     highlight_new_lines,
     is_prefix_offset,
     lexer_for_entry,
-    load_diff_rows,
+    load_diff_view,
     reconstruct_new_source,
     render_diff_rows,
     toggle_file,
@@ -35,28 +37,189 @@ def test_format_file_label_preserves_plain_paths(
     assert format_file_label(entry) == expected
 
 
-def test_load_diff_rows_forwards_the_raw_patch_to_the_parser(
+@pytest.fixture(autouse=True)
+def _clear_diff_view_cache() -> None:
+    build_diff_view.cache_clear()
+
+
+def test_load_diff_view_forwards_root_and_entry_to_git_diff_then_builds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = Path("/repo")
     entry = FileEntry("file.txt", Side.STAGED, "M")
     patch = "raw patch"
-    rows = [Row(1, 1, "line", "context")]
+    view = DiffView(Text("built"), None)
     calls: list[tuple[object, ...]] = []
 
     def fake_diff(received_root: Path, received_entry: FileEntry) -> str:
         calls.append(("diff", received_root, received_entry))
         return patch
 
-    def fake_parse(received_patch: str) -> list[Row]:
-        calls.append(("parse", received_patch))
-        return rows
+    def fake_build_diff_view(
+        received_entry: FileEntry, received_patch: str
+    ) -> DiffView:
+        calls.append(("build", received_entry, received_patch))
+        return view
 
     monkeypatch.setattr("gitpane.app.git.diff", fake_diff)
-    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
+    monkeypatch.setattr("gitpane.app.build_diff_view", fake_build_diff_view)
 
-    assert load_diff_rows(root, entry) is rows
-    assert calls == [("diff", root, entry), ("parse", patch)]
+    assert load_diff_view(root, entry) is view
+    assert calls == [("diff", root, entry), ("build", entry, patch)]
+
+
+def test_build_diff_view_renders_the_exact_text_of_render_diff_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = FileEntry("example.txt", Side.STAGED, "M")
+    rows = [
+        Row(1, 1, "context [not markup]", "context"),
+        Row(2, None, "removed", "remove"),
+        Row(None, 2, "added", "add"),
+    ]
+    monkeypatch.setattr("gitpane.app.diff.parse", lambda _: rows)
+
+    view = build_diff_view(entry, "irrelevant patch text")
+
+    assert view.text.plain == render_diff_rows(entry, rows).plain
+    assert view.text.spans == render_diff_rows(entry, rows).spans
+
+
+def test_build_diff_view_reports_first_change_for_a_diff_with_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = FileEntry("example.diff", Side.STAGED, "M")
+    rows = [
+        Row(1, 1, "context", "context"),
+        Row(2, None, "removed", "remove"),
+        Row(None, 2, "added", "add"),
+    ]
+    monkeypatch.setattr("gitpane.app.diff.parse", lambda _: rows)
+
+    view = build_diff_view(entry, "irrelevant patch text")
+
+    assert view.first_change == 1
+
+
+def test_build_diff_view_reports_none_for_an_all_context_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = FileEntry("example.diff", Side.STAGED, "M")
+    rows = [
+        Row(1, 1, "context one", "context"),
+        Row(2, 2, "context two", "context"),
+    ]
+    monkeypatch.setattr("gitpane.app.diff.parse", lambda _: rows)
+
+    view = build_diff_view(entry, "irrelevant patch text")
+
+    assert view.first_change is None
+
+
+def test_build_diff_view_caches_repeated_identical_entry_and_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    entry = FileEntry("a.txt", Side.STAGED, "M")
+    patch = "patch a"
+
+    def fake_parse(received_patch: str) -> list[Row]:
+        calls.append("parse")
+        return [Row(1, 1, received_patch, "context")]
+
+    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+        calls.append("render")
+        return Text(rows[0].text)
+
+    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
+    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
+
+    first = build_diff_view(entry, patch)
+    second = build_diff_view(entry, patch)
+
+    assert calls == ["parse", "render"]
+    assert first is second
+
+
+def test_build_diff_view_rebuilds_for_a_different_patch_on_the_same_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    entry = FileEntry("a.txt", Side.STAGED, "M")
+
+    def fake_parse(received_patch: str) -> list[Row]:
+        calls.append("parse")
+        return [Row(1, 1, received_patch, "context")]
+
+    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+        calls.append("render")
+        return Text(rows[0].text)
+
+    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
+    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
+
+    first = build_diff_view(entry, "patch a")
+    second = build_diff_view(entry, "patch b")
+
+    assert calls == ["parse", "render", "parse", "render"]
+    assert first.text.plain == "patch a"
+    assert second.text.plain == "patch b"
+
+
+def test_build_diff_view_rebuilds_for_a_different_entry_with_the_same_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    patch = "shared patch"
+
+    def fake_parse(received_patch: str) -> list[Row]:
+        calls.append("parse")
+        return [Row(1, 1, received_patch, "context")]
+
+    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+        calls.append("render")
+        return Text(f"{received_entry.path}:{rows[0].text}")
+
+    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
+    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
+
+    entry_a = FileEntry("a.txt", Side.STAGED, "M")
+    entry_b = FileEntry("b.txt", Side.STAGED, "M")
+
+    first = build_diff_view(entry_a, patch)
+    second = build_diff_view(entry_b, patch)
+
+    assert calls == ["parse", "render", "parse", "render"]
+    assert first.text.plain == "a.txt:shared patch"
+    assert second.text.plain == "b.txt:shared patch"
+
+
+def test_build_diff_view_evicts_the_oldest_entry_after_a_fifth_distinct_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_parse(received_patch: str) -> list[Row]:
+        calls.append("parse")
+        return [Row(1, 1, received_patch, "context")]
+
+    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+        calls.append("render")
+        return Text(rows[0].text)
+
+    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
+    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
+
+    entries = [FileEntry(f"{i}.txt", Side.STAGED, "M") for i in range(5)]
+
+    for entry in entries:
+        build_diff_view(entry, "patch")
+
+    assert calls == ["parse", "render"] * 5
+    calls.clear()
+
+    build_diff_view(entries[0], "patch")
+    assert calls == ["parse", "render"]
 
 
 def test_reconstruct_new_source_keeps_only_new_side_text_and_whitespace() -> None:

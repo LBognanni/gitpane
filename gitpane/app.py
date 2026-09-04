@@ -1,4 +1,6 @@
+import functools
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
@@ -22,9 +24,27 @@ def format_file_label(entry: FileEntry) -> str:
     return f"[ ] {entry.status} {entry.path}"
 
 
-def load_diff_rows(root: Path, entry: FileEntry) -> list[Row]:
-    """Load and parse the diff for an entry."""
-    return diff.parse(git.diff(root, entry))
+@dataclass(frozen=True)
+class DiffView:
+    """A prepared, ready-to-render diff for one file entry."""
+
+    text: Text
+    first_change: int | None
+
+
+@functools.lru_cache(maxsize=4)
+def build_diff_view(entry: FileEntry, patch: str) -> DiffView:
+    """Build the prepared diff view for an entry's patch text."""
+    rows = diff.parse(patch)
+    text = render_diff_rows(entry, rows)
+    first_change = diff.first_change_index(rows)
+    return DiffView(text, first_change)
+
+
+def load_diff_view(root: Path, entry: FileEntry) -> DiffView:
+    """Load the diff for an entry and return its prepared view."""
+    patch = git.diff(root, entry)
+    return build_diff_view(entry, patch)
 
 
 def toggle_file(root: Path, entry: FileEntry) -> None:
@@ -181,15 +201,14 @@ class GitPaneApp(App[None]):
 
         entry = event.item.entry
         self.selection = (entry.path, entry.side)
-        rows = load_diff_rows(self.root, entry)
-        self.query_one("#diff", Static).update(render_diff_rows(entry, rows))
+        view = load_diff_view(self.root, entry)
+        self.query_one("#diff", Static).update(view.text)
 
         diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
         diff_scroll.scroll_to(0, 0, animate=False)
-        first_change = diff.first_change_index(rows)
-        if first_change is not None:
+        if view.first_change is not None:
             self.call_after_refresh(
-                diff_scroll.scroll_to, 0, first_change, animate=False
+                diff_scroll.scroll_to, 0, view.first_change, animate=False
             )
 
     async def on_file_item_toggle_requested(
