@@ -69,6 +69,7 @@ def render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text:
         "add": Style(bgcolor="green"),
         "remove": Style(bgcolor="red"),
     }
+    new_side_index = 0
 
     for index, row in enumerate(rows):
         if index:
@@ -81,7 +82,8 @@ def render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text:
         if row.new_no is None:
             text.append(row.text)
         else:
-            text.append_text(highlighted_lines[row.new_no - 1])
+            text.append_text(highlighted_lines[new_side_index])
+            new_side_index += 1
         if style := styles.get(row.kind):
             text.stylize(style, row_start, len(text))
 

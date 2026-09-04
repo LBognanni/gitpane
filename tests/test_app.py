@@ -188,17 +188,16 @@ def test_render_diff_rows_preserves_empty_rows_without_extra_newlines() -> None:
     assert rendered.spans == []
 
 
-def test_render_diff_rows_projects_highlights_by_new_line_number(
+def test_render_diff_rows_projects_highlights_by_new_side_position(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entry = FileEntry("src/example.py", Side.UNSTAGED, "M")
     rows = [
-        Row(1, 1, "context", "context"),
-        Row(2, None, "removed", "remove"),
-        Row(None, 3, "added", "add"),
+        Row(20, 10, "context", "context"),
+        Row(21, None, "removed", "remove"),
+        Row(None, 30, "added", "add"),
     ]
     context = Text("context", style=Style(color="cyan"))
-    unused = Text("unused", style=Style(color="yellow"))
     addition = Text("added", style=Style(color="magenta"))
     calls: list[tuple[FileEntry, list[Row]]] = []
 
@@ -206,7 +205,7 @@ def test_render_diff_rows_projects_highlights_by_new_line_number(
         received_entry: FileEntry, received_rows: list[Row]
     ) -> list[Text]:
         calls.append((received_entry, received_rows))
-        return [context, unused, addition]
+        return [context, addition]
 
     monkeypatch.setattr("gitpane.app.highlight_new_lines", fake_highlight_new_lines)
 
@@ -214,7 +213,7 @@ def test_render_diff_rows_projects_highlights_by_new_line_number(
 
     assert calls == [(entry, rows)]
     assert (
-        rendered.plain == "     1    1 context\n-    2      removed\n+         3 added"
+        rendered.plain == "    20   10 context\n-   21      removed\n+        30 added"
     )
     spans = [(span.start, span.end, span.style) for span in rendered.spans]
     assert (12, 19, Style(color="cyan")) in spans
@@ -231,7 +230,7 @@ def test_render_diff_rows_projects_highlights_by_new_line_number(
     syntax_spans = [
         (start, end, style)
         for start, end, style in spans
-        if style in {Style(color="cyan"), Style(color="yellow"), Style(color="magenta")}
+        if style in {Style(color="cyan"), Style(color="magenta")}
     ]
     assert syntax_spans == [
         (12, 19, Style(color="cyan")),
