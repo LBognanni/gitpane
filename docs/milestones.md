@@ -1125,7 +1125,7 @@ test.
 | Story | Title | Status |
 | --- | --- | --- |
 | 1 | Reconstruct and highlight the new side | Complete |
-| 2 | Project syntax styles into rendered diff rows | Not started |
+| 2 | Project syntax styles into rendered diff rows | Complete |
 | 3 | Final cleanup and milestone verification | Not started |
 
 ## Story 1: Reconstruct and highlight the new side
