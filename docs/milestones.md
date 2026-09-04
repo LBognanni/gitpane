@@ -1022,3 +1022,311 @@ There is deliberately no `python -m gitpane.app`, `textual run`, `run_test()`,
 Pilot, app, browser, or smoke verification command. The user owns the design
 spec's real-repository navigation, mouse, diff-viewing, and stage/unstage
 milestone check after implementation is complete.
+
+
+# Milestone 5: Syntax-highlighted diffs
+
+## Goal
+
+Implement Step 5 of `docs/design-spec.md`: derive the selected file's new-side
+source from parsed unified-diff rows, highlight it with Rich `Syntax`, and
+project those styles back onto context and addition rows by their new-side line
+numbers. Removal text remains plain while the existing red/green complete-row
+diff backgrounds remain intact. The milestone is complete when this behavior,
+including language selection from `FileEntry.path`, is covered entirely by
+helper-level tests and all non-interactive project checks pass.
+
+Repository baseline: Milestones 1 through 4 are complete. `gitpane/app.py`
+already loads a selected `FileEntry` into a flat `list[Row]`, renders one Rich
+`Text` with fixed marker/line-number columns, and applies complete-row change
+backgrounds. Rich and Pygments are already transitive runtime requirements of
+Textual, so no dependency or lockfile change is needed. The working tree has an
+authorized uncommitted user documentation edit in `README.md`; every story
+must leave it byte-for-byte untouched and must not treat it as milestone work.
+
+## Scope boundary
+
+### In scope
+
+- Reconstructing new-side source by joining, with `\n`, the `text` of every
+  context/add row in existing row order and excluding every removal row.
+- Selecting a Rich/Pygments lexer from the selected `FileEntry.path` and the
+  reconstructed source through Rich's existing lexer-selection API.
+- Running the reconstructed source through Rich `Syntax.highlight()` once and
+  splitting the resulting Rich `Text` into styled lines while preserving blank
+  lines.
+- Applying a highlighted line to each row that has `new_no`, using the
+  one-based `new_no` as the index back into the reconstructed new side.
+- Keeping removal row text free of syntax styles.
+- Preserving the existing marker, old/new number columns, literal row text,
+  newline behavior, green addition background, and red removal background.
+- Passing the selected `FileEntry` into the renderer so its exact path drives
+  language selection.
+- Focused tests of module-level reconstruction, lexer/highlighting, and
+  rendering helpers using literal `FileEntry`/`Row`/`Text` values and
+  monkeypatches where isolation is useful.
+
+### Out of scope
+
+- Changes to Git commands, status parsing, unified-diff parsing, the model, or
+  first-change scrolling.
+- Highlighting removal text from the old file, reconstructing the old side, or
+  loading either file directly from the filesystem.
+- Per-hunk language detection, mixed-language regions, semantic parsing, custom
+  lexers, a hand-maintained extension map, or a user-configurable language
+  override.
+- Changing Rich's default syntax theme, introducing a GitPane theme, changing
+  diff background colors, or syntax-highlighting the gutter/line numbers.
+- File watching, automatic refresh, selection restoration, caching,
+  virtualization, threading/workers, performance redesign, or Step 6 work.
+- Side-by-side display, hunk/line staging, commit support, conflicts, renames,
+  binary-file support, and other post-MVP behavior.
+- Adding or changing direct dependencies, project metadata, the lockfile,
+  stylesheet, package initializer, or documentation other than appending this
+  Milestone 5 plan.
+- Any test that constructs or runs `GitPaneApp`, calls `App.run()` or
+  `App.run_test()`, uses a Pilot/event loop, invokes Git/subprocesses, creates a
+  repository, or performs an app, terminal UI, editor, browser, or smoke check.
+- Editing, reverting, staging, formatting, or otherwise touching the
+  authorized uncommitted `README.md` change.
+
+## Locked decisions
+
+| Area | Decision |
+| --- | --- |
+| Owned implementation files | Milestone implementation edits only `gitpane/app.py` and `tests/test_app.py`. `gitpane/diff.py`, `gitpane/model.py`, `gitpane/git.py`, `gitpane/app.tcss`, `gitpane/__init__.py`, `pyproject.toml`, and `uv.lock` remain unchanged. |
+| Reconstruction helper | Add `reconstruct_new_source(rows: Sequence[Row]) -> str` in `gitpane/app.py`. Select rows whose kind is not `"remove"` and join their exact `Row.text` values with one `\n` in row order. Do not use `old_no`, read the working tree, append an unconditional trailing newline, dedent, expand tabs, or strip whitespace. An empty/all-removal sequence returns `""`; a retained row whose text is empty still represents a real blank line. |
+| Language selection | Add a small `lexer_for_entry(entry: FileEntry, source: str) -> str` helper that calls `Syntax.guess_lexer(entry.path, source)` with the exact repository-relative path and reconstructed source and returns its result unchanged. This uses Rich's bundled Pygments filename/content knowledge for extensions, special filenames, and case handling without a new dependency or local mapping. Rich's `"default"` result is the robust plain-text fallback for an unknown or extensionless unmatched path; do not guess from `Path.suffix`, catch broad exceptions, or default unknown files to a specific programming language. |
+| Highlighting helper | Add `highlight_new_lines(entry: FileEntry, rows: Sequence[Row]) -> list[Text]`. Materialize the non-removal rows once so an empty/all-removal input can return `[]` without manufacturing a source line. Otherwise reconstruct the source, select the lexer once, construct one `Syntax(source, lexer)` with Rich defaults, call its public `highlight(source)` once, and split the returned `Text` on `"\n"` with blank lines retained. Ignore only a lexer-produced trailing split line that no row indexes; do not flatten styles to markup/ANSI strings or invoke one `Syntax` per row. |
+| New-side indexing | The renderer looks up syntax text only when `row.new_no is not None`, at `highlighted_lines[row.new_no - 1]`. This is deliberately one-based new-file indexing, not display-row or non-removal-list indexing; a removal interleaved before an addition must not shift the addition's syntax line. The existing full-context diff contract supplies the complete ordered new side and valid line numbers, so do not add a sparse-line remapping model or silently substitute neighboring styles. |
+| Renderer API | Change the helper signature to `render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text`, and update the one selection-handler call site to pass the same selected entry used to load the rows. Do not store a lexer/language on `FileEntry`, `Row`, or application state. |
+| Row composition | Continue to build one complete Rich `Text`. Append the existing plain gutter (`marker`, old number, new number, and separating space) and then append the corresponding highlighted line for context/add rows. Append `row.text` as plain text for removals. The resulting `.plain` value must be exactly the Milestone 4 output, including literal markup-looking text, whitespace, empty rows, and one separator newline between rows only. |
+| Style precedence | Preserve Rich syntax foreground styles on context/add text only. After composing each complete row, apply the existing green background to the complete addition row or red background to the complete removal row so diff backgrounds win over any syntax-theme background without discarding syntax foregrounds. Context rows receive no diff background. Gutter text receives no syntax token style. |
+| Removal policy | A row with `new_no is None` never indexes highlighted output. In particular, removals remain plain foreground text even when their content resembles source code; their only explicit style remains the existing complete-row red background. This intentional MVP limitation is not an error fallback. |
+| Testing seam | Tests call only `reconstruct_new_source`, `lexer_for_entry`, `highlight_new_lines`, and `render_diff_rows`. Use monkeypatching/controlled Rich `Text` values to prove call inputs and line-number projection without depending on a particular Pygments color palette. Do not instantiate `FileItem`, compose widgets, fabricate Textual events, or construct/run `GitPaneApp`. |
+| Dependencies | Import `Syntax` from `rich.syntax` and `Sequence` from `collections.abc`; Rich/Pygments already arrive through Textual. Do not add Rich or Pygments as a new direct dependency and do not regenerate `uv.lock`. |
+
+## Story execution rules
+
+Each story must be dispatched with its specification, this milestone's scope
+and locked decisions, exact paths, and the Required Coder-Prompt Rules from
+`docs/workflow.md`: **Do NOT boot the editor/application or run any
+browser/smoke test.** **NEVER use `git stash`, `git checkout --`, or `git
+restore` on any file not intentionally edited for this task; if something
+unexpected changes, stop and report it.** Escalate unresolved architectural
+decisions to the senior coder rather than guessing. Use
+`PYTHONDONTWRITEBYTECODE=1` for Python checks. A coder must not start another
+story, commit, update this status table, or touch `README.md`. Verification must
+not invoke Git, Textual app-running APIs, a Pilot, or a subprocess-based smoke
+test.
+
+## Story status
+
+| Story | Title | Status |
+| --- | --- | --- |
+| 1 | Reconstruct and highlight the new side | Complete |
+| 2 | Project syntax styles into rendered diff rows | Not started |
+| 3 | Final cleanup and milestone verification | Not started |
+
+## Story 1: Reconstruct and highlight the new side
+
+### Files
+
+- Edit `gitpane/app.py`.
+- Edit `tests/test_app.py`.
+- Do not edit `README.md` or any other file.
+
+### Work
+
+1. Import `Sequence` and Rich `Syntax`, then add the three locked helpers:
+   `reconstruct_new_source`, `lexer_for_entry`, and `highlight_new_lines`.
+   Keep them module-level and functional; do not introduce a highlighter class,
+   protocol, cache, or application state.
+2. Reconstruct source from context/add row text only. Preserve source ordering,
+   empty lines, indentation, tabs, trailing spaces, and markup-looking text;
+   only the join separators are synthesized.
+3. Pass the exact `FileEntry.path` and reconstructed source to
+   `Syntax.guess_lexer`. Retain Rich's `default` fallback rather than adding
+   extension aliases or special cases in GitPane.
+4. For a source containing at least one non-removal row, instantiate one
+   `Syntax` and call `highlight(source)` once. Split the returned Rich `Text`
+   with blank lines retained so token spans stay attached to their individual
+   lines. Return `[]` for empty/all-removal rows without calling the lexer or
+   highlighter.
+5. Add helper-level tests for reconstruction covering mixed context/removal/
+   addition rows, an empty retained row, whitespace, and empty/all-removal
+   input. Assert removals contribute neither content nor an extra separator.
+6. Add a helper-level language-selection test that monkeypatches
+   `Syntax.guess_lexer`, records the exact path and source, and proves the Rich
+   result is forwarded unchanged. Include a repository-relative path with
+   directories, spaces, and an uppercase extension; do not assert a
+   Pygments-version-specific lexer choice.
+7. Add helper-level highlighting tests with monkeypatched Rich seams that prove
+   one reconstructed source/lexer/highlight pass, retained blank styled lines,
+   and no work for all-removal input. Assert returned objects remain Rich
+   `Text`, not plain/markup/ANSI conversions.
+8. Do not alter `render_diff_rows` or its selection-handler call in this story;
+   renderer integration belongs to Story 2.
+
+### Acceptance criteria
+
+- Reconstruction is exactly `\n`.join of all and only non-removal `Row.text`
+  values in existing order, with source whitespace unchanged.
+- Language selection receives the exact selected entry path and complete
+  reconstructed source and relies solely on Rich's robust built-in selection
+  and plain default fallback.
+- Highlighting performs one whole-new-side Rich `Syntax` pass, preserves Rich
+  line styles and blank lines, and returns no lines for an all-removal/empty
+  sequence.
+- No filesystem read, Git call, per-row lexer pass, dependency/metadata change,
+  widget/app construction, or out-of-scope abstraction is introduced.
+- New tests are helper-level only and do not run Textual, Pilot, Git, a browser,
+  or a smoke process.
+- `README.md` remains exactly as found.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py
+```
+
+Do not run `python -m gitpane.app`, `textual run`, `run_test()`, a Pilot, Git,
+or any terminal/app/browser/smoke command.
+
+## Story 2: Project syntax styles into rendered diff rows
+
+### Files
+
+- Edit `gitpane/app.py`.
+- Edit `tests/test_app.py`.
+- Do not edit `README.md` or any other file.
+
+### Work
+
+1. Change `render_diff_rows` to accept the selected `FileEntry` before `rows`
+   and obtain highlighted new-side lines from the Story 1 helper exactly once.
+2. Preserve the existing gutter format and newline assembly. For each row with
+   `new_no`, append `highlighted_lines[new_no - 1]` as Rich `Text`; for a
+   removal, append its exact `row.text` as plain text without consulting the
+   highlighted lines.
+3. Apply the existing addition/removal background to the full row only after
+   gutter and content composition. Ensure this overlays a Syntax theme
+   background while retaining syntax foreground styles on addition text.
+   Context rows remain free of diff background and all gutter characters
+   remain free of syntax token styles.
+4. Update `on_list_view_selected` to call `render_diff_rows(entry, rows)` with
+   the exact entry already passed to `load_diff_rows`. Make no other event,
+   selection, refresh, scrolling, or mutation change.
+5. Update the existing renderer tests for the new signature while retaining
+   their exact `.plain`, line-number, markup-literal, blank-row, newline, and
+   complete-row-background assertions.
+6. Add a helper-level renderer test that replaces `highlight_new_lines` with
+   controlled differently styled Rich lines. Use context/add rows with
+   meaningful `new_no` values and an interleaved removal to prove lookup is by
+   `new_no - 1`, not display index. Assert syntax foreground is confined to
+   context/add content, never the gutter or removal text.
+7. In the same focused assertions, prove the full addition retains green
+   background in combination with its syntax foreground, the full removal is
+   red with plain foreground, and context receives syntax style without a diff
+   background. Avoid assertions tied to Rich's default theme colors by using
+   the controlled helper result.
+8. Do not instantiate or run the app to test the updated event call. Establish
+   the one straightforward call-site change by code review and static checks,
+   consistent with the existing Milestone 4 testing boundary.
+
+### Acceptance criteria
+
+- Selecting an entry passes that same `FileEntry` into rendering, so its exact
+  path determines the lexer without new model/application state.
+- Rendered plain output is byte-for-text identical to Milestone 4 for the same
+  rows.
+- Every context/add row displays the highlighted line selected by its one-based
+  `new_no`; interleaved removals do not shift that lookup.
+- Removal content is syntax-plain, while complete-row red/green backgrounds and
+  syntax foreground on additions coexist with the locked precedence.
+- Gutter text is never syntax-highlighted, and scrolling, toggling, refresh,
+  and diff loading behavior are unchanged.
+- Tests exercise renderer/helper behavior only; they do not construct or run
+  Textual, use a Pilot, invoke Git/subprocesses, or perform smoke checks.
+- `README.md` and every non-owned implementation file remain untouched.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py
+```
+
+Do not run `python -m gitpane.app`, `textual run`, `run_test()`, a Pilot, Git,
+or any terminal/app/browser/smoke command.
+
+## Story 3: Final cleanup and milestone verification
+
+### Files
+
+- Review and, only when a Milestone 5 fix is required, edit
+  `gitpane/app.py`.
+- Review and, only when a Milestone 5 fix is required, edit
+  `tests/test_app.py`.
+- Do not modify `README.md`, dependency files, documentation, or any other
+  source/test file; status-table updates and commits remain the orchestrator's
+  responsibility.
+
+### Work
+
+1. Review the complete Milestone 5 implementation for the exact reconstruction
+   rule, one Rich `Syntax` pass, Rich-based path/language selection, direct
+   `new_no - 1` projection, plain removals, and preserved row backgrounds.
+2. Remove only accidental milestone complexity such as a local extension map,
+   duplicate highlighting passes, per-row `Syntax` construction, style-to-
+   markup conversion, filesystem reads, broad exception handling, caches,
+   speculative watcher behavior, stale imports, or debug output.
+3. Confirm the renderer's `.plain` contract and all Milestone 4 selection,
+   scrolling, refresh, and mutation code remain unchanged except for passing
+   the selected entry into the renderer.
+4. Confirm every new/changed test calls module-level helpers only and uses
+   literals or monkeypatches. It must not instantiate widgets/the app, fabricate
+   UI events, start an event loop/Pilot, invoke Git/subprocesses, create a
+   repository, or claim to verify Rich/Pygments internals.
+5. Apply only fixes needed for this milestone, then run the complete static and
+   unit-test checks below once with bytecode writing disabled. Do not add a
+   manual app, Git, browser, terminal UI, or smoke verification step.
+6. Review the intended owned-file changes through the available non-destructive
+   orchestration context. The authorized `README.md` edit must remain untouched;
+   stop and report any other unexpected change rather than trying to clean it
+   with Git commands.
+7. Leave status-table updates and all commits to the orchestrator as required
+   by `docs/workflow.md`.
+
+### Acceptance criteria
+
+- All Milestone 5 and prior helper-level acceptance criteria hold together.
+- The implementation is the smallest clear Step 5 extension: three small
+  helpers, one entry-aware renderer, and one updated call site, with no custom
+  language registry or later-milestone machinery.
+- Rich `Syntax` highlights one reconstructed new side and styles are projected
+  by `new_no`; removals remain syntax-plain and diff backgrounds are preserved.
+- Ruff formatting/lint, strict mypy, and the complete pytest suite pass.
+- Tests remain helper-level and no app/Pilot/event loop, Git/subprocess,
+  repository, browser, editor, terminal UI, or smoke process is run.
+- Only `gitpane/app.py` and `tests/test_app.py` are implementation changes for
+  this milestone. Dependency metadata and lockfile remain unchanged, and the
+  pre-existing `README.md` edit remains untouched.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run pytest
+```
+
+There is deliberately no dependency sync, Git command, `python -m gitpane.app`,
+`textual run`, `run_test()`, Pilot, app, terminal UI, editor, browser, or smoke
+verification command. The user owns visual confirmation after implementation.
