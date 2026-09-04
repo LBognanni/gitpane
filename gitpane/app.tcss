@@ -1,0 +1,18 @@
+#body {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 30;
+    min-width: 30;
+    max-width: 30;
+}
+
+#staged-list,
+#unstaged-list {
+    height: 1fr;
+}
+
+#diff-scroll {
+    overflow: scroll scroll;
+}
