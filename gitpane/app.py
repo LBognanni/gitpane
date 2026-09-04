@@ -1,7 +1,9 @@
+from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar
 
 from rich.style import Style
+from rich.syntax import Syntax
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
@@ -31,6 +33,27 @@ def toggle_file(root: Path, entry: FileEntry) -> None:
         git.unstage(root, entry.path)
     else:
         git.stage(root, entry.path)
+
+
+def reconstruct_new_source(rows: Sequence[Row]) -> str:
+    """Reconstruct the new side of a diff from its non-removal rows."""
+    return "\n".join(row.text for row in rows if row.kind != "remove")
+
+
+def lexer_for_entry(entry: FileEntry, source: str) -> str:
+    """Select Rich's lexer for an entry and its reconstructed source."""
+    return Syntax.guess_lexer(entry.path, source)
+
+
+def highlight_new_lines(entry: FileEntry, rows: Sequence[Row]) -> list[Text]:
+    """Highlight the reconstructed new side as individual Rich text lines."""
+    new_rows = [row for row in rows if row.kind != "remove"]
+    if not new_rows:
+        return []
+
+    source = reconstruct_new_source(new_rows)
+    syntax = Syntax(source, lexer_for_entry(entry, source))
+    return syntax.highlight(source).split("\n", allow_blank=True)[: len(new_rows)]
 
 
 def is_prefix_offset(offset: int) -> bool:

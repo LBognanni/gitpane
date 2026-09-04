@@ -2,11 +2,15 @@ from pathlib import Path
 
 import pytest
 from rich.style import Style
+from rich.text import Text
 
 from gitpane.app import (
     format_file_label,
+    highlight_new_lines,
     is_prefix_offset,
+    lexer_for_entry,
     load_diff_rows,
+    reconstruct_new_source,
     render_diff_rows,
     toggle_file,
 )
@@ -53,6 +57,101 @@ def test_load_diff_rows_forwards_the_raw_patch_to_the_parser(
 
     assert load_diff_rows(root, entry) is rows
     assert calls == [("diff", root, entry), ("parse", patch)]
+
+
+def test_reconstruct_new_source_keeps_only_new_side_text_and_whitespace() -> None:
+    rows = [
+        Row(1, 1, "  context\t", "context"),
+        Row(2, None, "removed", "remove"),
+        Row(3, 2, "", "context"),
+        Row(None, 3, "[added]  ", "add"),
+    ]
+
+    assert reconstruct_new_source(rows) == "  context\t\n\n[added]  "
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [[], [Row(1, None, "removed", "remove"), Row(2, None, "also removed", "remove")]],
+)
+def test_reconstruct_new_source_returns_empty_for_no_new_side(rows: list[Row]) -> None:
+    assert reconstruct_new_source(rows) == ""
+
+
+def test_lexer_for_entry_forwards_exact_path_and_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_guess_lexer(path: str, source: str) -> str:
+        calls.append((path, source))
+        return "returned unchanged"
+
+    monkeypatch.setattr("gitpane.app.Syntax.guess_lexer", fake_guess_lexer)
+    entry = FileEntry("directory with spaces/example.PY", Side.STAGED, "M")
+    source = "print('source')\n"
+
+    assert lexer_for_entry(entry, source) == "returned unchanged"
+    assert calls == [("directory with spaces/example.PY", source)]
+
+
+def test_highlight_new_lines_uses_one_whole_source_pass_and_retains_blank_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+    highlighted = Text("first\n\nthird")
+    highlighted.stylize("bold", 0, 5)
+    highlighted.stylize("italic", 7, 12)
+
+    class FakeSyntax:
+        def __init__(self, source: str, lexer: str) -> None:
+            calls.append(("init", source, lexer))
+
+        @staticmethod
+        def guess_lexer(path: str, source: str) -> str:
+            calls.append(("guess", path, source))
+            return "fake-lexer"
+
+        def highlight(self, source: str) -> Text:
+            calls.append(("highlight", source))
+            return highlighted
+
+    monkeypatch.setattr("gitpane.app.Syntax", FakeSyntax)
+    entry = FileEntry("src/example.py", Side.UNSTAGED, "M")
+    rows = [
+        Row(1, 1, "first", "context"),
+        Row(2, None, "removed", "remove"),
+        Row(None, 2, "", "add"),
+        Row(3, 3, "third", "context"),
+    ]
+
+    lines = highlight_new_lines(entry, rows)
+
+    assert calls == [
+        ("guess", "src/example.py", "first\n\nthird"),
+        ("init", "first\n\nthird", "fake-lexer"),
+        ("highlight", "first\n\nthird"),
+    ]
+    assert all(isinstance(line, Text) for line in lines)
+    assert [line.plain for line in lines] == ["first", "", "third"]
+    assert [(span.start, span.end, span.style) for span in lines[0].spans] == [
+        (0, 5, "bold")
+    ]
+    assert [(span.start, span.end, span.style) for span in lines[2].spans] == [
+        (0, 5, "italic")
+    ]
+
+
+def test_highlight_new_lines_skips_lexer_and_highlighter_for_all_removals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected(*_: object) -> None:
+        raise AssertionError("highlighting should not run")
+
+    monkeypatch.setattr("gitpane.app.Syntax", unexpected)
+    entry = FileEntry("removed.py", Side.STAGED, "M")
+
+    assert highlight_new_lines(entry, [Row(1, None, "removed", "remove")]) == []
 
 
 def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() -> None:
