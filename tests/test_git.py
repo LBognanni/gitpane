@@ -1,5 +1,10 @@
+import os
+import subprocess
 from pathlib import Path
 
+import pytest
+
+import gitpane.git
 from gitpane.git import _parse_status
 from gitpane.model import FileEntry, Side
 
@@ -51,3 +56,140 @@ def test_parse_status_skips_rename_continuation() -> None:
 
     assert state.staged == []
     assert state.unstaged == []
+
+
+def test_run_preserves_subprocess_settings_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="output")
+
+    monkeypatch.setenv("INHERITED_VALUE", "retained")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert gitpane.git._run(Path("/repository"), "status", "--short") == "output"
+
+    command, kwargs = calls[0]
+    assert command == ["git", "status", "--short"]
+    assert kwargs["cwd"] == Path("/repository")
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    assert kwargs["check"] is False
+    assert "shell" not in kwargs
+    environment = kwargs["env"]
+    assert isinstance(environment, dict)
+    assert environment["INHERITED_VALUE"] == "retained"
+    assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+    assert os.environ["INHERITED_VALUE"] == "retained"
+
+
+def test_run_rejects_nonzero_return_codes_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1, stdout="diff"
+        ),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        gitpane.git._run(Path("/repository"), "diff")
+
+
+def test_run_accepts_explicit_return_code_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1, stdout="diff"
+        ),
+    )
+
+    assert (
+        gitpane.git._run(Path("/repository"), "diff", allowed_returncodes=(0, 1))
+        == "diff"
+    )
+
+
+def test_run_rejects_return_code_two_when_one_is_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 2, stdout="error"
+        ),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        gitpane.git._run(Path("/repository"), "diff", allowed_returncodes=(0, 1))
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected_args", "expected_kwargs"),
+    [
+        (
+            FileEntry("staged file.txt", Side.STAGED, "M"),
+            (
+                "diff",
+                "--cached",
+                "-U9999",
+                "--no-color",
+                "--no-ext-diff",
+                "--",
+                "staged file.txt",
+            ),
+            {},
+        ),
+        (
+            FileEntry("-tracked file.txt", Side.UNSTAGED, "M"),
+            (
+                "diff",
+                "-U9999",
+                "--no-color",
+                "--no-ext-diff",
+                "--",
+                "-tracked file.txt",
+            ),
+            {},
+        ),
+        (
+            FileEntry("-untracked file.txt", Side.UNSTAGED, "?"),
+            (
+                "diff",
+                "--no-index",
+                "-U9999",
+                "--no-color",
+                "--no-ext-diff",
+                "--",
+                "/dev/null",
+                "-untracked file.txt",
+            ),
+            {"allowed_returncodes": (0, 1)},
+        ),
+    ],
+)
+def test_diff_builds_command_and_forwards_output(
+    monkeypatch: pytest.MonkeyPatch,
+    entry: FileEntry,
+    expected_args: tuple[str, ...],
+    expected_kwargs: dict[str, tuple[int, int]],
+) -> None:
+    calls: list[tuple[Path, tuple[str, ...], dict[str, tuple[int, int]]]] = []
+
+    def fake_run(root: Path, *args: str, **kwargs: tuple[int, int]) -> str:
+        calls.append((root, args, kwargs))
+        return "diff output\n"
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    assert gitpane.git.diff(Path("/repository"), entry) == "diff output\n"
+    assert calls == [(Path("/repository"), expected_args, expected_kwargs)]

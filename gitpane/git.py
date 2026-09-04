@@ -7,16 +7,18 @@ from pathlib import Path
 from gitpane.model import FileEntry, RepoState, Side
 
 
-def _run(cwd: Path, *args: str) -> str:
+def _run(cwd: Path, *args: str, allowed_returncodes: tuple[int, ...] = (0,)) -> str:
     """Run a Git command in *cwd* and return its standard output."""
     result = subprocess.run(
         ["git", *args],
         cwd=cwd,
         capture_output=True,
-        check=True,
+        check=False,
         text=True,
         env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
+    if result.returncode not in allowed_returncodes:
+        result.check_returncode()
     return result.stdout
 
 
@@ -61,6 +63,35 @@ def status(root: Path) -> RepoState:
     return _parse_status(
         _run(root, "status", "--porcelain=v2", "-z", "--untracked-files=all"), root
     )
+
+
+def diff(root: Path, entry: FileEntry) -> str:
+    """Return the full Git diff for *entry*."""
+    if entry.side is Side.STAGED:
+        return _run(
+            root,
+            "diff",
+            "--cached",
+            "-U9999",
+            "--no-color",
+            "--no-ext-diff",
+            "--",
+            entry.path,
+        )
+    if entry.status == "?":
+        return _run(
+            root,
+            "diff",
+            "--no-index",
+            "-U9999",
+            "--no-color",
+            "--no-ext-diff",
+            "--",
+            "/dev/null",
+            entry.path,
+            allowed_returncodes=(0, 1),
+        )
+    return _run(root, "diff", "-U9999", "--no-color", "--no-ext-diff", "--", entry.path)
 
 
 def main() -> None:
