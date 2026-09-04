@@ -1098,7 +1098,7 @@ must leave it byte-for-byte untouched and must not treat it as milestone work.
 | Reconstruction helper | Add `reconstruct_new_source(rows: Sequence[Row]) -> str` in `gitpane/app.py`. Select rows whose kind is not `"remove"` and join their exact `Row.text` values with one `\n` in row order. Do not use `old_no`, read the working tree, append an unconditional trailing newline, dedent, expand tabs, or strip whitespace. An empty/all-removal sequence returns `""`; a retained row whose text is empty still represents a real blank line. |
 | Language selection | Add a small `lexer_for_entry(entry: FileEntry, source: str) -> str` helper that calls `Syntax.guess_lexer(entry.path, source)` with the exact repository-relative path and reconstructed source and returns its result unchanged. This uses Rich's bundled Pygments filename/content knowledge for extensions, special filenames, and case handling without a new dependency or local mapping. Rich's `"default"` result is the robust plain-text fallback for an unknown or extensionless unmatched path; do not guess from `Path.suffix`, catch broad exceptions, or default unknown files to a specific programming language. |
 | Highlighting helper | Add `highlight_new_lines(entry: FileEntry, rows: Sequence[Row]) -> list[Text]`. Materialize the non-removal rows once so an empty/all-removal input can return `[]` without manufacturing a source line. Otherwise reconstruct the source, select the lexer once, construct one `Syntax(source, lexer)` with Rich defaults, call its public `highlight(source)` once, and split the returned `Text` on `"\n"` with blank lines retained. Ignore only a lexer-produced trailing split line that no row indexes; do not flatten styles to markup/ANSI strings or invoke one `Syntax` per row. |
-| New-side indexing | The renderer looks up syntax text only when `row.new_no is not None`, at `highlighted_lines[row.new_no - 1]`. This is deliberately one-based new-file indexing, not display-row or non-removal-list indexing; a removal interleaved before an addition must not shift the addition's syntax line. The existing full-context diff contract supplies the complete ordered new side and valid line numbers, so do not add a sparse-line remapping model or silently substitute neighboring styles. |
+| New-side indexing | `highlighted_lines` is compact and corresponds positionally to rows with `new_no` in their existing order. While rendering, keep a zero-based new-side index: consume the next highlighted line for each row whose `new_no is not None`, and do not consume one for a removal. Do not use the absolute `new_no` as a list index. Full-context diffs normally make the compact source the complete new file, but parsed unified diffs may begin above line 1 or contain gaps between hunks; their line numbers remain display metadata and must not cause an out-of-range lookup. Do not add padding, a sparse-line remapping model, or a fallback that substitutes a neighboring style. |
 | Renderer API | Change the helper signature to `render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text`, and update the one selection-handler call site to pass the same selected entry used to load the rows. Do not store a lexer/language on `FileEntry`, `Row`, or application state. |
 | Row composition | Continue to build one complete Rich `Text`. Append the existing plain gutter (`marker`, old number, new number, and separating space) and then append the corresponding highlighted line for context/add rows. Append `row.text` as plain text for removals. The resulting `.plain` value must be exactly the Milestone 4 output, including literal markup-looking text, whitespace, empty rows, and one separator newline between rows only. |
 | Style precedence | Preserve Rich syntax foreground styles on context/add text only. After composing each complete row, apply the existing green background to the complete addition row or red background to the complete removal row so diff backgrounds win over any syntax-theme background without discarding syntax foregrounds. Context rows receive no diff background. Gutter text receives no syntax token style. |
@@ -1126,7 +1126,7 @@ test.
 | --- | --- | --- |
 | 1 | Reconstruct and highlight the new side | Complete |
 | 2 | Project syntax styles into rendered diff rows | Complete |
-| 3 | Final cleanup and milestone verification | Not started |
+| 3 | Final cleanup and milestone verification | Complete |
 
 ## Story 1: Reconstruct and highlight the new side
 
@@ -1280,8 +1280,10 @@ or any terminal/app/browser/smoke command.
 ### Work
 
 1. Review the complete Milestone 5 implementation for the exact reconstruction
-   rule, one Rich `Syntax` pass, Rich-based path/language selection, direct
-   `new_no - 1` projection, plain removals, and preserved row backgrounds.
+   rule, one Rich `Syntax` pass, Rich-based path/language selection, compact
+   new-side projection, plain removals, and preserved row backgrounds. Replace
+   the renderer's `highlighted_lines[row.new_no - 1]` lookup with a zero-based
+   index that advances once for each row with `new_no` and never for a removal.
 2. Remove only accidental milestone complexity such as a local extension map,
    duplicate highlighting passes, per-row `Syntax` construction, style-to-
    markup conversion, filesystem reads, broad exception handling, caches,
@@ -1289,10 +1291,15 @@ or any terminal/app/browser/smoke command.
 3. Confirm the renderer's `.plain` contract and all Milestone 4 selection,
    scrolling, refresh, and mutation code remain unchanged except for passing
    the selected entry into the renderer.
-4. Confirm every new/changed test calls module-level helpers only and uses
-   literals or monkeypatches. It must not instantiate widgets/the app, fabricate
-   UI events, start an event loop/Pilot, invoke Git/subprocesses, create a
-   repository, or claim to verify Rich/Pygments internals.
+4. Replace the renderer test that masks compact-source indexing with one whose
+   context/add rows have non-1-starting, gapped `new_no` values and whose fake
+   `highlight_new_lines` returns only the two corresponding compact lines.
+   Assert those first and second styles are projected in row order across an
+   interleaved removal, without padding or an `IndexError`. Keep every
+   new/changed test at module-helper level with literals or monkeypatches; it
+   must not instantiate widgets/the app, fabricate UI events, start an event
+   loop/Pilot, invoke Git/subprocesses, create a repository, or claim to verify
+   Rich/Pygments internals.
 5. Apply only fixes needed for this milestone, then run the complete static and
    unit-test checks below once with bytecode writing disabled. Do not add a
    manual app, Git, browser, terminal UI, or smoke verification step.
@@ -1309,8 +1316,9 @@ or any terminal/app/browser/smoke command.
 - The implementation is the smallest clear Step 5 extension: three small
   helpers, one entry-aware renderer, and one updated call site, with no custom
   language registry or later-milestone machinery.
-- Rich `Syntax` highlights one reconstructed new side and styles are projected
-  by `new_no`; removals remain syntax-plain and diff backgrounds are preserved.
+- Rich `Syntax` highlights one compact reconstructed new side and styles are
+  projected positionally to rows with `new_no`; removals consume no highlighted
+  line, remain syntax-plain, and preserve diff backgrounds.
 - Ruff formatting/lint, strict mypy, and the complete pytest suite pass.
 - Tests remain helper-level and no app/Pilot/event loop, Git/subprocess,
   repository, browser, editor, terminal UI, or smoke process is run.
