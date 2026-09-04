@@ -14,6 +14,17 @@ Run GitPane from inside a Git repository.
 
 ## Install And Run
 
+Install GitPane as a `uv` tool so the `gitpane` command is available in any
+repository:
+
+```bash
+uv tool install git+https://github.com/LBognanni/gitpane
+gitpane
+```
+
+To work on GitPane itself, clone the repository and run it from source
+instead:
+
 ```bash
 uv sync --dev
 uv run python -m gitpane.app
