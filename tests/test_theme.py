@@ -71,6 +71,7 @@ def test_locked_semantic_palette_is_exact() -> None:
         "focused-selection": "#174ea6",
         "addition-background": "#142b1d",
         "removal-background": "#351b20",
+        "diff-background": "#272822",
     }
 
 
@@ -114,9 +115,13 @@ def test_renderer_diff_backgrounds_match_tcss(kind: str, variable: str) -> None:
         ),
         (
             "#diff-scroll",
-            ("background: $canvas", "color: $text", "scrollbar-color: $accent"),
+            (
+                "background: $diff-background",
+                "color: $text",
+                "scrollbar-color: $accent",
+            ),
         ),
-        ("#diff", ("background: $canvas", "color: $text")),
+        ("#diff", ("background: $diff-background", "color: $text")),
     ],
 )
 def test_surface_rules_use_the_locked_palette(
@@ -189,6 +194,7 @@ def test_layout_and_diff_scroll_contracts_are_retained() -> None:
         ("#f0f3f6", "#174ea6"),
         ("#f0f3f6", "#142b1d"),
         ("#f0f3f6", "#351b20"),
+        ("#f0f3f6", "#272822"),
     ],
 )
 def test_locked_text_pairs_meet_contrast_floor(first: str, second: str) -> None:

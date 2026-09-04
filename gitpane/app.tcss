@@ -10,6 +10,7 @@ $focus: #f2cc60;
 $focused-selection: #174ea6;
 $addition-background: #142b1d;
 $removal-background: #351b20;
+$diff-background: #272822;
 
 Screen {
     background: $canvas;
@@ -70,7 +71,7 @@ ListView:focus > ListItem.--highlight {
 
 #diff-scroll {
     overflow: scroll scroll;
-    background: $canvas;
+    background: $diff-background;
     color: $text;
     scrollbar-color: $accent;
 }
@@ -78,6 +79,6 @@ ListView:focus > ListItem.--highlight {
 #diff {
     width: auto;
     text-wrap: nowrap;
-    background: $canvas;
+    background: $diff-background;
     color: $text;
 }
