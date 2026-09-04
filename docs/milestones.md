@@ -200,6 +200,274 @@ git status --short
 ```
 
 
+# Milestone 3: Git diff and index operations
+
+## Goal
+
+Complete the remaining Step 2 Git operations from `docs/design-spec.md`: produce
+a full-context unified diff for a selected staged, unstaged, or untracked
+`FileEntry`, and provide whole-file stage and unstage operations. The milestone
+is complete when the command-building and return-code policy are covered by
+unit tests without invoking Git, and all existing status and unified-diff tests
+continue to pass.
+
+Repository baseline: Milestones 1 and 2 are complete. `gitpane/git.py` already
+has the single `_run()` subprocess path, repository-root discovery, status
+parsing, and the status-printing module entry point. `FileEntry.side` and
+`FileEntry.status` contain all information needed to choose a diff command.
+The currently untracked `gitpane/__pycache__/` and `tests/__pycache__/`
+directories are known artifacts from approved verification. They are not
+milestone work: do not edit, delete, stage, or otherwise clean them up, and do
+not treat their presence in `git status --short` as a failure.
+
+## Scope boundary
+
+### In scope
+
+- Extending the existing `_run()` helper just enough to accept an explicit set
+  of successful return codes while retaining its current default failure
+  behavior.
+- Full-context, no-color, no-external-diff output for staged and tracked
+  unstaged entries.
+- Unified no-index diff output for untracked entries by comparing `/dev/null`
+  with the repository-relative path.
+- Treating return code `1` as successful only for the untracked no-index diff;
+  its standard output is still returned.
+- Whole-path stage and unstage commands, with `--` before every user-controlled
+  path.
+- Focused tests of GitPane's exact argument construction, output forwarding,
+  and subprocess error policy using monkeypatches/fakes. The tests do not run
+  Git or assert Git's behavior.
+
+### Out of scope
+
+- Changes to status parsing, status display, the `FileEntry`/`RepoState` model,
+  or unified-diff parsing in `gitpane/diff.py`.
+- Hunk or line staging, partial index updates, pathspec expansion, multiple-path
+  operations, rename/conflict/binary handling, or special submodule behavior.
+- Interpreting, parsing, caching, highlighting, or rendering the returned diff.
+- Adding a CLI for diff/stage/unstage or changing the existing
+  `python -m gitpane.git` output.
+- UI/Textual work, application wiring, file watching, threading, or later
+  design-spec steps.
+- Adding dependencies or changing `pyproject.toml`, `uv.lock`,
+  `gitpane/__init__.py`, `gitpane/model.py`, `gitpane/diff.py`, README, or any
+  design/workflow document.
+- Creating repositories or files to exercise Git, invoking Git from tests, or
+  testing whether the selected Git commands work.
+- Booting the application or performing editor, browser, or smoke checks.
+- Removing, ignoring, staging, or modifying the known untracked
+  `gitpane/__pycache__/` and `tests/__pycache__/` artifacts.
+
+## Locked decisions
+
+| Area | Decision |
+| --- | --- |
+| Public function signatures | Add `diff(root: Path, entry: FileEntry) -> str`, `stage(root: Path, path: str) -> None`, and `unstage(root: Path, path: str) -> None` to `gitpane/git.py`. The design specification's `diff(entry)`/`stage(path)`/`unstage(path)` notation names the operations but omits repository context; use an explicit first `root` argument, consistent with the existing `status(root)` API and without global repository state. Do not re-export these functions from `gitpane/__init__.py`. |
+| Shared execution path | Keep `_run()` as the only call to `subprocess.run`; no operation may execute a subprocess directly. Preserve the existing `git` prefix, `cwd`, captured text output, inherited environment, and `GIT_OPTIONAL_LOCKS=0`. Do not introduce a runner class or custom exception. |
+| Return-code policy | Add a keyword-only `allowed_returncodes: tuple[int, ...] = (0,)` parameter after `_run()`'s variadic Git arguments. Run the subprocess without automatic checking, return stdout when its code is allowed, and otherwise raise the standard `subprocess.CalledProcessError` via the completed process's normal check mechanism. Existing callers therefore continue to accept only `0`. Pass `(0, 1)` only for the untracked no-index diff; code `1` from every other command and code `2` or higher from every command still propagate. |
+| Staged diff command | For `entry.side is Side.STAGED`, run exactly `git diff --cached -U9999 --no-color --no-ext-diff -- <entry.path>` at `root` and return stdout unchanged. The entry status does not alter this branch. |
+| Tracked unstaged diff command | For `entry.side is Side.UNSTAGED` and `entry.status != "?"`, run exactly `git diff -U9999 --no-color --no-ext-diff -- <entry.path>` at `root` and return stdout unchanged. |
+| Untracked diff command | For `entry.side is Side.UNSTAGED` and `entry.status == "?"`, run exactly `git diff --no-index -U9999 --no-color --no-ext-diff -- /dev/null <entry.path>` at `root`, allowing return codes `0` and `1`. Use the literal `/dev/null` required by the design; do not read the file in Python or synthesize patch text. A staged entry is governed by its side even if malformed test/application data gives it status `?`. |
+| Path safety | Preserve every path string exactly and place it after `--`. Do not normalize it, resolve it, convert it to an absolute path, split it, quote it manually, or use a shell. Git receives each path as one subprocess argument. |
+| Stage command | `stage(root, path)` runs exactly `git add -- <path>` through `_run()` and ignores successful stdout. It returns `None`; failures propagate. |
+| Unstage command | `unstage(root, path)` runs exactly `git restore --staged -- <path>` through `_run()` and ignores successful stdout. It returns `None`; failures propagate. Supporting repositories without a resolvable `HEAD` is not part of this milestone. |
+| Testing boundary | Extend `tests/test_git.py`. Monkeypatch `_run()` when testing operation-to-command mapping and monkeypatch `subprocess.run` when testing `_run()` itself. Assert calls and application handling of fake completed processes; never invoke Git, create a temporary repository, or test Git output semantics. No additional mocking dependency is needed. |
+
+## Story execution rules
+
+Each story must be dispatched with its specification, the milestone scope and
+locked decisions, and the required coder-prompt rules from
+`docs/workflow.md`: do not boot the editor/application or run browser/smoke
+tests; never use `git stash`, `git checkout --`, or `git restore` on files not
+intentionally edited; stop and report unexpected changes; and escalate an
+unresolved architectural decision to the senior coder rather than guessing.
+The existing cache directories must remain untouched. Use
+`PYTHONDONTWRITEBYTECODE=1` for Python verification so the approved cache
+artifacts are not rewritten.
+
+## Story status
+
+| Story | Title | Status |
+| --- | --- | --- |
+| 1 | Build staged, unstaged, and untracked diff commands | Complete |
+| 2 | Add whole-file stage and unstage commands | Planned |
+| 3 | Final cleanup and milestone verification | Planned |
+
+## Story 1: Build staged, unstaged, and untracked diff commands
+
+### Files
+
+- Edit `gitpane/git.py`.
+- Edit `tests/test_git.py`.
+
+### Work
+
+1. Extend `_run()` with the locked keyword-only allowed-return-code parameter.
+   Preserve every existing subprocess setting and keep `0` as the default and
+   only successful code for existing callers.
+2. Use the completed process's return code to return stdout for an allowed code
+   and raise the standard subprocess error for every other code. Do not catch,
+   wrap, log, or convert the error.
+3. Add `diff(root, entry)` and select exactly one of the three locked commands:
+   staged by side, untracked by unstaged side plus `?` status, and otherwise
+   tracked unstaged. Return `_run()` output without stripping or parsing it.
+4. Add focused `_run()` tests with a fake `subprocess.run` that prove:
+   - the command is a list beginning with `git`, the supplied root is `cwd`,
+     text stdout is captured, and shell execution is not introduced;
+   - the inherited environment is retained and `GIT_OPTIONAL_LOCKS` is
+     overridden to `0`;
+   - stdout is returned for code `0`, a nonzero code raises by default, code
+     `1` can be explicitly accepted, and code `2` still raises when only
+     `(0, 1)` is accepted.
+5. Add `diff()` tests by replacing `_run()` with a recording fake. Cover the
+   exact ordered argument tuple for staged, tracked unstaged, and untracked
+   entries, including a path containing spaces and leading dashes as one
+   unchanged argument. Prove only the untracked call supplies
+   `allowed_returncodes=(0, 1)` and that returned diff text is forwarded
+   unchanged.
+6. Keep all tests process-local. Do not invoke Git or make assertions about how
+   Git itself interprets the commands.
+
+### Acceptance criteria
+
+- `_run()` remains the sole subprocess boundary and preserves its existing
+  command, working-directory, text-capture, and environment behavior.
+- Existing root and status calls still raise on any nonzero return code without
+  needing call-site changes.
+- `diff()` emits the exact command for each supported `FileEntry` category,
+  protects the path with `--`, and returns stdout byte-for-text unchanged.
+- An untracked no-index diff accepts code `1`; no other new success exception is
+  introduced, and genuine errors continue to propagate as
+  `subprocess.CalledProcessError`.
+- Tests verify GitPane's construction and policy entirely through fakes and do
+  not run or test Git.
+- Existing status tests remain green and no out-of-scope files or cache
+  artifacts are modified.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_git.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/git.py tests/test_git.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/git.py tests/test_git.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/git.py tests/test_git.py
+git status --short
+```
+
+The status command may continue to show the two known untracked cache
+directories. They must not be removed, modified, or staged.
+
+## Story 2: Add whole-file stage and unstage commands
+
+### Files
+
+- Edit `gitpane/git.py`.
+- Edit `tests/test_git.py`.
+
+### Work
+
+1. Add `stage(root, path)` as the smallest wrapper around the exact locked
+   `add` command. Ignore `_run()`'s successful stdout and return `None`.
+2. Add `unstage(root, path)` as the smallest wrapper around the exact locked
+   `restore --staged` command. Ignore successful stdout and return `None`.
+3. Add tests using a recording `_run()` fake that assert the supplied root and
+   exact ordered arguments for each function. Use a path containing spaces and
+   beginning with a dash to prove it remains one argument after `--`.
+4. Have the fake return nonempty text and assert both APIs still return `None`.
+   Have it raise a sentinel `subprocess.CalledProcessError` and assert each API
+   lets that same failure propagate; do not add operation-specific error
+   handling.
+5. Do not execute stage/unstage against this or any temporary repository, and
+   do not add multi-path convenience behavior or application/UI wiring.
+
+### Acceptance criteria
+
+- `stage()` constructs only `git add -- <path>` at the supplied root.
+- `unstage()` constructs only `git restore --staged -- <path>` at the supplied
+  root.
+- Paths are forwarded unchanged as a single argument after `--`.
+- Both operations return `None` on success and preserve the standard subprocess
+  exception on failure.
+- Unit tests establish application command construction and error propagation
+  without invoking or testing Git.
+- Story 1's diff behavior and all prior status behavior remain unchanged.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_git.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/git.py tests/test_git.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/git.py tests/test_git.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/git.py tests/test_git.py
+git status --short
+```
+
+The status command may continue to show the two known untracked cache
+directories. They must not be removed, modified, or staged.
+
+## Story 3: Final cleanup and milestone verification
+
+### Files
+
+- Review and, only when a milestone fix is required, edit `gitpane/git.py`.
+- Review and, only when a milestone fix is required, edit `tests/test_git.py`.
+- Do not modify any other file during cleanup; status-table documentation
+  updates and commits remain the orchestrator's responsibility.
+
+### Work
+
+1. Review the complete Milestone 3 implementation diff for duplicated command
+   execution, unnecessary abstractions, stale imports, broad exception
+   handling, path mutation, debug output, and work outside the scope boundary.
+2. Confirm that `_run()` is still the only subprocess call, only the no-index
+   untracked diff accepts code `1`, every user path follows `--`, and all three
+   diff branches plus stage/unstage have exact command-construction tests.
+3. Confirm tests use only fakes/monkeypatching and literal model values: no Git
+   invocation, temporary repository, filesystem setup, or claims about Git's
+   own behavior are present.
+4. Apply only fixes required by this milestone. Do not begin UI integration,
+   diff rendering, highlighting, or watcher work, and do not change project
+   metadata or prior milestone modules.
+5. Run the complete project verification once with bytecode writing disabled.
+   Do not run a real diff, stage, unstage, or app command as a smoke test.
+6. Inspect `git status --short`. Treat the existing untracked
+   `gitpane/__pycache__/` and `tests/__pycache__/` as known approved artifacts:
+   do not remove, edit, ignore, or stage them. Report any other unexpected file
+   and stop rather than using a destructive cleanup command.
+7. Leave status-table updates and all commits to the orchestrator, as required
+   by `docs/workflow.md`.
+
+### Acceptance criteria
+
+- All Milestone 3 story acceptance criteria hold together with all prior tests.
+- The implementation is the smallest clear extension of the existing
+  functional Git API and has no second subprocess path or global repository
+  state.
+- Ruff formatting/lint, strict mypy, and the complete pytest suite pass.
+- Tests cover exact commands, output/return behavior, and allowed/disallowed
+  return codes without executing Git or testing Git itself.
+- Only `gitpane/git.py` and `tests/test_git.py` are changed by implementation
+  work; the known untracked cache directories remain untouched and unstaged.
+- No application, editor, UI, browser, smoke process, or real mutating Git
+  operation is run.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run pytest
+git diff --check -- gitpane/git.py tests/test_git.py
+git status --short
+```
+
+Expected status may include the intentionally untouched untracked
+`gitpane/__pycache__/` and `tests/__pycache__/` directories in addition to the
+milestone's intended tracked edits. Do not attempt to clean those artifacts.
+
+
 # Milestone 2: Unified diff parsing
 
 ## Goal
