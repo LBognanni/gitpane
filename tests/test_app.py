@@ -155,29 +155,88 @@ def test_highlight_new_lines_skips_lexer_and_highlighter_for_all_removals(
 
 
 def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() -> None:
+    entry = FileEntry("example.txt", Side.STAGED, "M")
     rendered = render_diff_rows(
+        entry,
         [
             Row(1, 1, "context [not markup]", "context"),
             Row(2, None, "removed", "remove"),
             Row(None, 2, "added", "add"),
-        ]
+        ],
     )
 
     assert (
         rendered.plain
         == "     1    1 context [not markup]\n-    2      removed\n+         2 added"
     )
-    assert [(span.start, span.end, span.style) for span in rendered.spans] == [
+    assert [
+        (span.start, span.end, span.style)
+        for span in rendered.spans
+        if span.style in {Style(bgcolor="red"), Style(bgcolor="green")}
+    ] == [
         (33, 52, Style(bgcolor="red")),
         (53, 70, Style(bgcolor="green")),
     ]
 
 
 def test_render_diff_rows_preserves_empty_rows_without_extra_newlines() -> None:
-    rendered = render_diff_rows([Row(None, None, "", "context")])
+    rendered = render_diff_rows(
+        FileEntry("empty.txt", Side.STAGED, "M"), [Row(None, None, "", "context")]
+    )
 
     assert rendered.plain == "            "
     assert rendered.spans == []
+
+
+def test_render_diff_rows_projects_highlights_by_new_line_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = FileEntry("src/example.py", Side.UNSTAGED, "M")
+    rows = [
+        Row(1, 1, "context", "context"),
+        Row(2, None, "removed", "remove"),
+        Row(None, 3, "added", "add"),
+    ]
+    context = Text("context", style=Style(color="cyan"))
+    unused = Text("unused", style=Style(color="yellow"))
+    addition = Text("added", style=Style(color="magenta"))
+    calls: list[tuple[FileEntry, list[Row]]] = []
+
+    def fake_highlight_new_lines(
+        received_entry: FileEntry, received_rows: list[Row]
+    ) -> list[Text]:
+        calls.append((received_entry, received_rows))
+        return [context, unused, addition]
+
+    monkeypatch.setattr("gitpane.app.highlight_new_lines", fake_highlight_new_lines)
+
+    rendered = render_diff_rows(entry, rows)
+
+    assert calls == [(entry, rows)]
+    assert (
+        rendered.plain == "     1    1 context\n-    2      removed\n+         3 added"
+    )
+    spans = [(span.start, span.end, span.style) for span in rendered.spans]
+    assert (12, 19, Style(color="cyan")) in spans
+    assert (52, 57, Style(color="magenta")) in spans
+    background_spans = [
+        (start, end, style)
+        for start, end, style in spans
+        if style in {Style(bgcolor="red"), Style(bgcolor="green")}
+    ]
+    assert background_spans == [
+        (20, 39, Style(bgcolor="red")),
+        (40, 57, Style(bgcolor="green")),
+    ]
+    syntax_spans = [
+        (start, end, style)
+        for start, end, style in spans
+        if style in {Style(color="cyan"), Style(color="yellow"), Style(color="magenta")}
+    ]
+    assert syntax_spans == [
+        (12, 19, Style(color="cyan")),
+        (52, 57, Style(color="magenta")),
+    ]
 
 
 @pytest.mark.parametrize(

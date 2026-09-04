@@ -61,9 +61,10 @@ def is_prefix_offset(offset: int) -> bool:
     return 0 <= offset <= 2
 
 
-def render_diff_rows(rows: list[Row]) -> Text:
+def render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text:
     """Render parsed diff rows as one plain Rich text value."""
     text = Text()
+    highlighted_lines = highlight_new_lines(entry, rows)
     styles = {
         "add": Style(bgcolor="green"),
         "remove": Style(bgcolor="red"),
@@ -72,13 +73,17 @@ def render_diff_rows(rows: list[Row]) -> Text:
     for index, row in enumerate(rows):
         if index:
             text.append("\n")
+        row_start = len(text)
         marker = {"add": "+", "remove": "-"}.get(row.kind, " ")
         old_no = "" if row.old_no is None else str(row.old_no)
         new_no = "" if row.new_no is None else str(row.new_no)
-        text.append(
-            f"{marker} {old_no:>4} {new_no:>4} {row.text}",
-            style=styles.get(row.kind),
-        )
+        text.append(f"{marker} {old_no:>4} {new_no:>4} ")
+        if row.new_no is None:
+            text.append(row.text)
+        else:
+            text.append_text(highlighted_lines[row.new_no - 1])
+        if style := styles.get(row.kind):
+            text.stylize(style, row_start, len(text))
 
     return text
 
@@ -175,7 +180,7 @@ class GitPaneApp(App[None]):
         entry = event.item.entry
         self.selection = (entry.path, entry.side)
         rows = load_diff_rows(self.root, entry)
-        self.query_one("#diff", Static).update(render_diff_rows(rows))
+        self.query_one("#diff", Static).update(render_diff_rows(entry, rows))
 
         diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
         diff_scroll.scroll_to(0, 0, animate=False)
