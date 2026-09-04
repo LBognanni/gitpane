@@ -94,6 +94,16 @@ def diff(root: Path, entry: FileEntry) -> str:
     return _run(root, "diff", "-U9999", "--no-color", "--no-ext-diff", "--", entry.path)
 
 
+def stage(root: Path, path: str) -> None:
+    """Stage *path* in *root*."""
+    _run(root, "add", "--", path)
+
+
+def unstage(root: Path, path: str) -> None:
+    """Unstage *path* in *root*."""
+    _run(root, "restore", "--staged", "--", path)
+
+
 def main() -> None:
     """Print Git status for the current repository."""
     state = status(repo_root())

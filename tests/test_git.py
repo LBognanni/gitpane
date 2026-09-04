@@ -193,3 +193,49 @@ def test_diff_builds_command_and_forwards_output(
 
     assert gitpane.git.diff(Path("/repository"), entry) == "diff output\n"
     assert calls == [(Path("/repository"), expected_args, expected_kwargs)]
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_args"),
+    [
+        (gitpane.git.stage, ("add", "--", "-file with spaces.txt")),
+        (
+            gitpane.git.unstage,
+            ("restore", "--staged", "--", "-file with spaces.txt"),
+        ),
+    ],
+)
+def test_stage_operations_build_commands_and_ignore_output(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: object,
+    expected_args: tuple[str, ...],
+) -> None:
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_run(root: Path, *args: str) -> str:
+        calls.append((root, args))
+        return "nonempty output"
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    assert callable(operation)
+    assert operation(Path("/repository"), "-file with spaces.txt") is None
+    assert calls == [(Path("/repository"), expected_args)]
+
+
+@pytest.mark.parametrize("operation", [gitpane.git.stage, gitpane.git.unstage])
+def test_stage_operations_propagate_run_errors(
+    monkeypatch: pytest.MonkeyPatch, operation: object
+) -> None:
+    error = subprocess.CalledProcessError(1, ["git", "command"])
+
+    def fake_run(root: Path, *args: str) -> str:
+        raise error
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    assert callable(operation)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        operation(Path("/repository"), "-file with spaces.txt")
+
+    assert raised.value is error
