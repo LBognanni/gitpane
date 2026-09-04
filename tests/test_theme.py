@@ -3,6 +3,11 @@ import re
 from pathlib import Path
 
 import pytest
+from rich.style import Style
+
+from gitpane.app import render_diff_rows
+from gitpane.diff import Row
+from gitpane.model import FileEntry, Side
 
 STYLESHEET = Path(__file__).resolve().parents[1] / "gitpane" / "app.tcss"
 
@@ -48,6 +53,10 @@ def _contrast(first: str, second: str) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def _rgb(color: str) -> tuple[int, int, int]:
+    return (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+
+
 def test_locked_semantic_palette_is_exact() -> None:
     assert _variables(_stylesheet()) == {
         "canvas": "#0d1117",
@@ -63,6 +72,30 @@ def test_locked_semantic_palette_is_exact() -> None:
         "addition-background": "#142b1d",
         "removal-background": "#351b20",
     }
+
+
+@pytest.mark.parametrize(
+    ("kind", "variable"),
+    [("add", "addition-background"), ("remove", "removal-background")],
+)
+def test_renderer_diff_backgrounds_match_tcss(kind: str, variable: str) -> None:
+    row = (
+        Row(None, 1, "added", "add")
+        if kind == "add"
+        else Row(1, None, "removed", "remove")
+    )
+    rendered = render_diff_rows(FileEntry("example.txt", Side.STAGED, "M"), [row])
+
+    expected = _rgb(_variables(_stylesheet())[variable])
+    backgrounds = [
+        span.style
+        for span in rendered.spans
+        if isinstance(span.style, Style)
+        and span.style.bgcolor is not None
+        and tuple(span.style.bgcolor.get_truecolor()) == expected
+    ]
+    assert len(backgrounds) == 1
+    assert backgrounds[0].color is None
 
 
 @pytest.mark.parametrize(

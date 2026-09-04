@@ -172,10 +172,10 @@ def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() ->
     assert [
         (span.start, span.end, span.style)
         for span in rendered.spans
-        if span.style in {Style(bgcolor="red"), Style(bgcolor="green")}
+        if span.style in {Style(bgcolor="#351b20"), Style(bgcolor="#142b1d")}
     ] == [
-        (33, 52, Style(bgcolor="red")),
-        (53, 70, Style(bgcolor="green")),
+        (33, 52, Style(bgcolor="#351b20")),
+        (53, 70, Style(bgcolor="#142b1d")),
     ]
 
 
@@ -221,12 +221,16 @@ def test_render_diff_rows_projects_highlights_by_new_side_position(
     background_spans = [
         (start, end, style)
         for start, end, style in spans
-        if style in {Style(bgcolor="red"), Style(bgcolor="green")}
+        if style in {Style(bgcolor="#351b20"), Style(bgcolor="#142b1d")}
     ]
     assert background_spans == [
-        (20, 39, Style(bgcolor="red")),
-        (40, 57, Style(bgcolor="green")),
+        (20, 39, Style(bgcolor="#351b20")),
+        (40, 57, Style(bgcolor="#142b1d")),
     ]
+    assert all(
+        isinstance(style, Style) and style.color is None
+        for _, _, style in background_spans
+    )
     syntax_spans = [
         (start, end, style)
         for start, end, style in spans
@@ -236,6 +240,22 @@ def test_render_diff_rows_projects_highlights_by_new_side_position(
         (12, 19, Style(color="cyan")),
         (52, 57, Style(color="magenta")),
     ]
+    assert all(
+        start >= 12 and end <= 19 or start >= 52 and end <= 57
+        for start, end, style in spans
+        if style in {Style(color="cyan"), Style(color="magenta")}
+    )
+    assert not any(
+        start < 39 and end > 20 and isinstance(style, Style) and style.color is not None
+        for start, end, style in spans
+    )
+    assert not any(
+        start < 19
+        and end > 0
+        and isinstance(style, Style)
+        and style.bgcolor is not None
+        for start, end, style in spans
+    )
 
 
 @pytest.mark.parametrize(

@@ -66,8 +66,8 @@ def render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text:
     text = Text()
     highlighted_lines = highlight_new_lines(entry, rows)
     styles = {
-        "add": Style(bgcolor="green"),
-        "remove": Style(bgcolor="red"),
+        "add": Style(bgcolor="#142b1d"),
+        "remove": Style(bgcolor="#351b20"),
     }
     new_side_index = 0
 
