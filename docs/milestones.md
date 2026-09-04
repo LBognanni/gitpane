@@ -689,3 +689,336 @@ uv run pytest
 printf '%s\n' '--- a/example.txt' '+++ b/example.txt' '@@ -1,2 +1,2 @@' ' same' '-old' '+new' | uv run python -m gitpane.diff
 git status --short
 ```
+
+
+# Milestone 4: Basic Textual UI
+
+## Goal
+
+Implement Step 4 of `docs/design-spec.md`: a basic Textual application with
+staged and unstaged file lists in a fixed-width left pane and a scrollable,
+plain unified diff on the right. Selecting a row loads its full-context diff;
+Space or the row's `[ ]` prefix stages/unstages the whole file; and `r`
+refreshes repository status. The milestone is complete when the non-running
+application logic is covered by unit tests and all project checks pass. Per
+`docs/workflow.md`, launching the app and real-repository navigation,
+stage/unstage, mouse, and smoke checks remain user-owned.
+
+Repository baseline: Milestones 1 through 3 are complete. `gitpane.git`
+provides repository discovery, status, full-context diff, stage, and unstage;
+`gitpane.diff` provides `parse()` and `first_change_index()`; and the model
+distinguishes staged and unstaged `FileEntry` values. There is no UI module,
+stylesheet, UI test, or Textual dependency. The working tree is clean at plan
+time.
+
+## Scope boundary
+
+### In scope
+
+- Adding Textual as the sole new direct runtime dependency and regenerating the
+  lockfile with `uv`.
+- `gitpane/app.py` as the executable Textual application module and
+  `gitpane/app.tcss` as its stylesheet.
+- Two independently navigable `ListView` widgets, staged above unstaged, in one
+  left `Vertical` fixed at exactly 30 columns.
+- One right-side `VerticalScroll` containing one `Static` diff widget.
+- Repository status loading on mount and on the `r` binding, preserving the
+  order returned by `git.status()`.
+- Selection loading through `git.diff()` followed by `diff.parse()`.
+- Plain Rich `Text` row rendering with a marker, old/new line numbers, row text,
+  and green/red backgrounds for additions/removals.
+- Initial scrolling to the first add/remove row using
+  `diff.first_change_index()`.
+- Whole-file stage/unstage with Space on the focused list row or a mouse click
+  on that row's literal `[ ]` prefix, followed by status refresh.
+- Focused unit tests for pure/separable UI application logic without running a
+  Textual event loop or invoking Git.
+
+### Out of scope
+
+- Syntax or language highlighting, reconstructed file content, or Step 5 work.
+- File watching, automatic refresh, debounce behavior, selection restoration,
+  diff caching, threading, or Step 6 work.
+- Side-by-side display, hunk/line staging, commit support, conflicts, rename or
+  binary handling, and changes to existing Git/diff/model behavior.
+- Optimized `render_line`, virtualized/custom diff widgets, themes, dialogs,
+  headers, footers, command palettes, help screens, notifications, or error
+  recovery UI.
+- Updating a diff in place after external changes. Every manual or mutation
+  refresh may clear the current selection and right pane; Step 6 owns
+  re-applying a surviving selection.
+- Tests that call `App.run()`, `App.run_test()`, use a Pilot, start an event
+  loop, invoke subprocesses/Git, create repositories, or perform terminal,
+  browser, editor, app, or smoke checks.
+- Changes to `gitpane/git.py`, `gitpane/diff.py`, `gitpane/model.py`,
+  `gitpane/__init__.py`, existing tests, README, design spec, or workflow.
+
+## Locked decisions
+
+| Area | Decision |
+| --- | --- |
+| Dependencies | Add only `textual>=1.0.0` to `[project].dependencies` and regenerate `uv.lock` through `uv add`/`uv lock`; never hand-edit the lockfile. Do not add a Textual pytest plugin, snapshot package, watcher, or other direct dependency. Rich is already a required Textual dependency and is used only for Textual's `Text` renderable. |
+| Module entry point | Create `gitpane/app.py` with `main() -> None` and an `if __name__ == "__main__"` guard. `main()` discovers the root with `git.repo_root()`, constructs the app with that explicit `Path`, and calls `run()`. Importing the module must not discover a repository, read status, or start Textual. Do not add a console-script entry point or re-export UI names. |
+| Widget tree | Compose one horizontal body containing a left `Vertical` and a right `VerticalScroll`. The left container holds a plain `Static` heading and `ListView` for staged entries, then the same pair for unstaged entries. The right scroll contains exactly one `Static` used for the complete diff `Text`. Use stable IDs for the sidebar, both lists, scroll, and diff so handlers and TCSS do not depend on tree position. |
+| Sizing | In `gitpane/app.tcss`, set the left `Vertical` width, minimum width, and maximum width to `30`; it must not grow or shrink. Let the right `VerticalScroll` consume the remaining width and scroll on both axes. Each file list shares available sidebar height. Do not calculate terminal widths in Python. |
+| File item | Use one small `ListItem` subclass carrying its immutable `FileEntry`. Its visible, markup-disabled label is exactly `[ ] {status} {path}`. Do not truncate, quote, normalize, decorate, color, or syntax-highlight paths. The two lists contain only these items and retain `git.status()` ordering. |
+| Refresh | On mount and from `r`, call `git.status(self.root)`, clear and repopulate both lists, set `selection` to `None`, clear the diff `Static`, and scroll the diff container to the origin. Focus and highlight the first staged entry, or the first unstaged entry when staged is empty; tolerate both lists being empty. Keep this synchronous Git work simple for the MVP—no worker or thread. |
+| Selection | Store selection as `tuple[str, Side] | None`. `on_list_view_selected` obtains the selected item's `FileEntry`, assigns `(entry.path, entry.side)`, calls `git.diff(self.root, entry)`, passes that exact string to `diff.parse()`, renders all returned rows, and replaces the right `Static` content. Do not load a diff merely because refresh highlights the first row. Selecting either list uses the same path. |
+| Initial diff position | After replacing the `Static`, reset the scroll to the origin. If `diff.first_change_index(rows)` returns an index, schedule a post-layout scroll to that zero-based row; otherwise remain at the origin. Do not add offsets for headers because the diff widget has none. |
+| Plain row format | Build one Rich `Text` for all rows; do not use markup or `Syntax`. Render each row as `{marker} {old:>4} {new:>4} {text}`, where marker is `+`, `-`, or one space, and a missing number is four spaces. Separate rows with one newline and do not synthesize an additional row. Apply a green background to the complete addition row, a red background to the complete removal row, and no explicit style to context. Preserve `Row.text` exactly, including markup-looking characters and whitespace. |
+| Keyboard toggle | Bind Space to one action. It acts only when a staged/unstaged `ListView` has focus and has a highlighted file item. Dispatch by `entry.side`: staged calls `git.unstage(self.root, entry.path)` and unstaged (including `?`) calls `git.stage(self.root, entry.path)`. If there is no focused item, do nothing. |
+| Mouse toggle | A normal row click retains Textual's standard selection behavior and therefore loads its diff. Only a click whose item-local horizontal offset falls on columns `0`, `1`, or `2` (the literal `[ ]`) requests the same toggle for that clicked item's entry; stop that prefix click from also producing a stale selection load. Put the offset predicate in a tiny pure helper so boundary behavior can be tested without an app. Do not add a checkbox widget or separate per-row button. |
+| Mutation result | After a successful stage/unstage, perform the same full refresh, clearing selection and diff. Let existing Git exceptions propagate; error dialogs/retry behavior are not part of this milestone. Never infer or manually move an item between lists. |
+| Test seam | Keep only three small module-level helpers where they isolate logic from Textual: format the file label, load rows (`git.diff` then `diff.parse`), and dispatch stage/unstage. The row renderer and prefix-offset predicate are also directly testable functions. Do not introduce a controller, repository protocol, service class, or dependency-injection framework. |
+| Testing | Create `tests/test_app.py`. Test helpers with literal `FileEntry`/`Row` values and monkeypatched module functions. Assertions cover exact labels and plain row output/style spans, diff-to-parser call order/data, side-based mutation dispatch, and prefix offset boundaries. Tests must not instantiate/run the application merely to inspect layout; widget composition and TCSS are verified by review, Ruff, mypy, and user-owned app checks. |
+
+## Story execution rules
+
+Each story must be dispatched with its specification, this milestone's scope
+and locked decisions, exact paths, and the Required Coder-Prompt Rules from
+`docs/workflow.md`: **Do NOT boot the editor/application or run any
+browser/smoke test.** **NEVER use `git stash`, `git checkout --`, or `git
+restore` on any file not intentionally edited for this task; if something
+unexpected changes, stop and report it.** Escalate unresolved architectural
+decisions to the senior coder rather than guessing. Use
+`PYTHONDONTWRITEBYTECODE=1` for Python checks. A coder must not start another
+story, commit, or update this status table.
+
+## Story status
+
+| Story | Title | Status |
+| --- | --- | --- |
+| 1 | Add Textual and compose the status panes | Complete |
+| 2 | Load and render selected diffs | Not started |
+| 3 | Add keyboard and prefix-click stage toggles | Not started |
+| 4 | Final cleanup and milestone verification | Not started |
+
+## Story 1: Add Textual and compose the status panes
+
+### Files
+
+- Edit `pyproject.toml`.
+- Regenerate `uv.lock`; do not hand-edit it.
+- Create `gitpane/app.py`.
+- Create `gitpane/app.tcss`.
+- Create `tests/test_app.py`.
+
+### Work
+
+1. Add the single locked direct dependency with `uv`, preserving all existing
+   metadata, development dependencies, and tool settings.
+2. Add the app class, explicit-root constructor, `CSS_PATH`, module `main()`,
+   and guarded executable entry point. Importing the module must remain inert.
+3. Compose the exact two-pane widget tree and add minimal TCSS that fixes the
+   left pane at 30 columns, shares its height between the two lists, and gives
+   the remaining scrollable area to the right pane. Add no visual chrome.
+4. Add the file-item type and exact markup-disabled `[ ] STATUS PATH` label.
+   Implement the label formatting as a pure helper.
+5. Implement mount/manual status refresh and list replacement. Preserve model
+   order, clear stale selection/diff/scroll state, and focus the first item from
+   the first nonempty list without selecting/loading its diff.
+6. Bind `r` to refresh. Do not add Space or mouse mutation behavior yet.
+7. Add unit tests for exact file labels, including spaces, leading dashes, and
+   markup-looking brackets in a path. Tests may call the pure helper only; do
+   not start or pilot the app.
+
+### Acceptance criteria
+
+- `textual>=1.0.0` is the only new direct dependency and `uv.lock` matches the
+  project metadata.
+- `gitpane.app` imports without repository or UI side effects and exposes a
+  guarded manual entry point.
+- The composed UI has exactly two left `ListView`s and one right
+  `VerticalScroll`/`Static`; TCSS fixes only the left container at 30 columns.
+- Refresh populates staged and unstaged rows in returned order and handles
+  either or both lists being empty.
+- Labels are literal plain text and preserve paths; no diff loading, mutation,
+  highlighting, watcher, or speculative abstraction is introduced.
+- Tests do not boot Textual or invoke Git.
+
+### Verification
+
+```bash
+uv sync --dev
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py
+git diff --check -- pyproject.toml uv.lock gitpane/app.py gitpane/app.tcss tests/test_app.py
+git status --short
+```
+
+Do not run `python -m gitpane.app`, Textual devtools/console, `run_test()`, or an
+app/browser/smoke command.
+
+## Story 2: Load and render selected diffs
+
+### Files
+
+- Edit `gitpane/app.py`.
+- Edit `tests/test_app.py`.
+
+### Work
+
+1. Add the locked row-loading helper that calls `git.diff(root, entry)` once
+   and passes its unchanged output directly to `diff.parse()` once.
+2. Add the plain renderer with the exact marker/number/text columns and row
+   background styles. Build one `Text`, preserve row text literally, and do not
+   import or use `Syntax`.
+3. Handle `ListView.Selected` only for the file-item type. Save the exact
+   `(path, side)` selection, load and render rows, replace the one diff
+   `Static`, and reset/schedule scrolling according to
+   `first_change_index()`.
+4. Unit-test the loading seam with recording fakes, proving the entry/root and
+   raw patch are forwarded in order and parsed rows are returned unchanged.
+5. Unit-test mixed context/remove/add rendering, missing line numbers, literal
+   markup-looking row text, empty rows, exact newline separation, and the
+   presence/absence of red and green background spans. Call helpers directly;
+   do not instantiate or run the app.
+
+### Acceptance criteria
+
+- Selecting an item from either list loads through the existing Git and parser
+  APIs and records its path/side selection.
+- The right side remains one `Static` inside one `VerticalScroll`, updated with
+  one complete plain `Text` rather than one widget per row.
+- Every row has the exact locked columns and background policy, with no syntax
+  highlighting or alteration of row text.
+- A loaded diff starts at its first changed row when one exists and at the
+  origin otherwise.
+- Focused tests prove loading and rendering logic without running Textual or
+  Git, and Story 1 behavior remains intact.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py
+git diff --check -- gitpane/app.py tests/test_app.py
+git status --short
+```
+
+Do not run `python -m gitpane.app`, `run_test()`, a Pilot, or any
+app/browser/smoke check.
+
+## Story 3: Add keyboard and prefix-click stage toggles
+
+### Files
+
+- Edit `gitpane/app.py`.
+- Edit `tests/test_app.py`.
+
+### Work
+
+1. Add the locked mutation helper. Dispatch solely from `FileEntry.side`, pass
+   the root/path unchanged, and return `None`; do not inspect status or mutate
+   model/list values.
+2. Bind Space and implement the focused-list/highlighted-item lookup. No focus
+   or item is a no-op; otherwise mutate and run the same full refresh used by
+   `r`.
+3. Add the pure item-local prefix predicate for inclusive offsets `0..2` and
+   connect the file item's click handler/message to mutate the clicked entry.
+   A click outside the prefix must remain an ordinary ListView selection.
+4. Ensure a prefix click cannot also finish a stale diff selection load, while
+   keyboard and mouse paths share mutation dispatch and post-success refresh.
+5. Unit-test stage and unstage dispatch with recording fakes, including an
+   untracked entry, unchanged paths, successful `None`, and propagation of the
+   same sentinel exception.
+6. Unit-test prefix boundaries (`-1`, `0`, `2`, and `3`) directly. Do not
+   fabricate Textual events or run/pilot an application.
+
+### Acceptance criteria
+
+- Space stages the highlighted unstaged item or unstages the highlighted
+  staged item and safely does nothing without a focused highlighted file row.
+- Clicking exactly the `[ ]` prefix toggles that clicked entry; clicking the
+  rest of a row selects and loads its diff normally.
+- Both toggle paths call only the existing whole-file Git APIs and perform a
+  full successful refresh that clears stale selection/diff state.
+- Paths and Git exceptions pass through unchanged; there is no optimistic list
+  mutation, checkbox state, hunk behavior, or error UI.
+- Unit tests cover dispatch and click-boundary application logic without
+  invoking Git or booting Textual.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py
+git diff --check -- gitpane/app.py tests/test_app.py
+git status --short
+```
+
+Do not execute real stage/unstage commands and do not run the app, `run_test()`,
+a Pilot, browser, editor, or smoke check.
+
+## Story 4: Final cleanup and milestone verification
+
+### Files
+
+- Review and, only when a milestone fix is required, edit `pyproject.toml`.
+- Regenerate, but never hand-edit, `uv.lock` if metadata changed.
+- Review and, only when a milestone fix is required, edit `gitpane/app.py`.
+- Review and, only when a milestone fix is required, edit `gitpane/app.tcss`.
+- Review and, only when a milestone fix is required, edit `tests/test_app.py`.
+- Do not modify any other file; status-table updates and commits remain the
+  orchestrator's responsibility.
+
+### Work
+
+1. Review the complete Milestone 4 diff for accidental complexity, duplicate
+   refresh/mutation paths, stale imports, debug output, unnecessary widgets or
+   dependencies, and work outside the scope boundary.
+2. Confirm the final widget tree and stylesheet retain two ordered lists in an
+   exactly 30-column left `Vertical` and one right
+   `VerticalScroll`/`Static`, with no `render_line`, `Syntax`, watcher, or
+   later-step behavior.
+3. Confirm selection uses `git.diff()` then `diff.parse()`, first-change scroll
+   uses the existing helper, and both mutation inputs use existing stage/
+   unstage APIs followed by the shared refresh.
+4. Confirm tests exercise only separable application logic with fakes and
+   literals. They must not call app-running APIs, invoke Git/subprocesses,
+   create a repository, or claim to verify Textual's own event behavior.
+5. Apply only required fixes, then run the complete project checks once. Do not
+   launch the module or substitute a terminal/browser/app smoke check.
+6. Inspect the intended diff and status for generated/local artifacts or
+   unrelated changes. Stop and report anything unexpected rather than using a
+   destructive Git command.
+7. Leave status-table updates and all commits to the orchestrator as required
+   by `docs/workflow.md`.
+
+### Acceptance criteria
+
+- All Milestone 4 and prior acceptance criteria hold together.
+- The UI remains the smallest clear Step 4 implementation: fixed two-list
+  sidebar, one scrollable plain diff, selection loading, two toggle inputs, and
+  manual refresh only.
+- `textual` is the only new direct dependency and metadata/lockfile agree.
+- Ruff formatting/lint, strict mypy, and the complete pytest suite pass.
+- Tests prove GitPane's helper/application decisions without testing Git or
+  running a Textual app/event loop.
+- Only milestone-owned implementation/dependency files are changed; generated
+  local artifacts and unrelated files are absent from the intended diff.
+- No application, editor, terminal UI, browser, Pilot, or smoke process is
+  booted, and no real stage/unstage operation is performed.
+
+### Verification
+
+```bash
+uv sync --dev
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run pytest
+git diff --check -- pyproject.toml uv.lock gitpane/app.py gitpane/app.tcss tests/test_app.py
+git status --short
+```
+
+There is deliberately no `python -m gitpane.app`, `textual run`, `run_test()`,
+Pilot, app, browser, or smoke verification command. The user owns the design
+spec's real-repository navigation, mouse, diff-viewing, and stage/unstage
+milestone check after implementation is complete.
