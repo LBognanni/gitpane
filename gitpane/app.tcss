@@ -16,3 +16,8 @@
 #diff-scroll {
     overflow: scroll scroll;
 }
+
+#diff {
+    width: auto;
+    text-wrap: nowrap;
+}
