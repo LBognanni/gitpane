@@ -29,7 +29,8 @@ def _parse_status(output: str, root: Path) -> RepoState:
     staged: list[FileEntry] = []
     unstaged: list[FileEntry] = []
 
-    for record in output.split("\0"):
+    records = iter(output.split("\0"))
+    for record in records:
         if not record:
             continue
         if record.startswith("1 "):
@@ -49,6 +50,8 @@ def _parse_status(output: str, root: Path) -> RepoState:
                     entries.append(FileEntry(path, side, "M"))
         elif record.startswith("? "):
             unstaged.append(FileEntry(record[2:], Side.UNSTAGED, "?"))
+        elif record.startswith("2 "):
+            next(records, None)
 
     return RepoState(root, staged, unstaged)
 

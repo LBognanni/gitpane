@@ -41,3 +41,13 @@ def test_parse_status_handles_untracked_and_unsupported_records() -> None:
 
     assert state.staged == [FileEntry("deleted.txt", Side.STAGED, "D")]
     assert state.unstaged == [FileEntry("path with spaces.txt", Side.UNSTAGED, "?")]
+
+
+def test_parse_status_skips_rename_continuation() -> None:
+    state = _parse_status(
+        "2 R. N... 100644 100644 100644 hash hash score new.txt\0? phantom.txt\0",
+        Path("/repository"),
+    )
+
+    assert state.staged == []
+    assert state.unstaged == []
