@@ -1653,3 +1653,343 @@ run`, `run_test()`, Pilot, app, terminal UI, editor, browser, visual snapshot,
 or smoke verification command. The user owns visual confirmation after the
 milestone is implemented. The pre-existing `README.md` modification is
 authorized user work and must remain untouched.
+
+
+# Milestone 7: Responsive large-diff loading
+
+## Goal
+
+Stop the interface from freezing while a large diff is prepared. Selecting a
+file must keep the Textual event loop responsive by moving the Git read, diff
+parse, syntax highlighting, and row composition off the message-handling path
+onto a thread worker, showing a loading state instead of a frozen frame, and
+discarding results that arrive after a newer selection or refresh. Re-selecting
+a file whose diff was already prepared in this session must reuse the previous
+result instead of re-highlighting it. The milestone is complete when the loader,
+cache, and staleness rule are covered by non-interactive unit tests and all
+project checks pass.
+
+This is the caching and threading work that `docs/design-spec.md` deferred from
+the MVP ("Out: ... caching, threading"). It is now justified by a measured
+freeze: on a 60,000-line Python file, `git.diff()` costs `0.03s`, `diff.parse()`
+`0.15s`, and row composition `0.20s`, while `Syntax(...).highlight(source)` costs
+`3.9s` and splitting the highlighted result into lines costs `2.0s` — over 95%
+of a roughly 6-7 second synchronous stall inside `on_list_view_selected`.
+
+Repository baseline: Milestones 1 through 6 are complete and the working tree is
+clean at plan time. `gitpane/app.py` contains the module helpers
+`format_file_label`, `load_diff_rows`, `toggle_file`, `reconstruct_new_source`,
+`lexer_for_entry`, `highlight_new_lines`, `is_prefix_offset`, and
+`render_diff_rows`, plus `FileItem` and `GitPaneApp`. `GitPaneApp` stores
+`root` and `selection`, refreshes status on mount and on `r`, toggles with Space
+and with a `[ ]` prefix click, and loads diffs synchronously inside
+`on_list_view_selected` by calling `load_diff_rows`, then `render_diff_rows`,
+then `Static.update`, then a `first_change_index` scroll scheduled with
+`call_after_refresh`. `gitpane/app.tcss` holds the Milestone 6 semantic palette,
+the fixed 30-column sidebar, the list state hierarchy, and `#diff-scroll` /
+`#diff` scrolling and colors. `tests/test_app.py` and `tests/test_theme.py`
+exercise helpers, renderer spans, and the stylesheet statically; no test starts
+Textual or Git. Textual `8.2.8` is already a direct dependency and provides
+`textual.work`, thread workers, `App.call_from_thread`, and the `Widget.loading`
+reactive, so no new dependency is required.
+
+## Scope boundary
+
+### In scope
+
+- Splitting the selected-file work into one cheap Git read plus one expensive
+  pure build step (`diff.parse` → `render_diff_rows` → `first_change_index`)
+  that returns a single immutable value.
+- A bounded, content-keyed cache of the most recently built diff values.
+- Running the Git read and the build step on a Textual thread worker started
+  from `on_list_view_selected`, with the result applied on the main thread.
+- A monotonic request-generation token, incremented on every selection and every
+  status refresh, that discards results belonging to a superseded request.
+- A loading state on the existing diff scroll container while a request is in
+  flight.
+- Keeping the loader, builder, cache, and staleness rule in plain, directly
+  callable module-level functions so tests exercise them synchronously.
+- Focused unit tests for the builder, the cache's hit/miss/eviction and
+  content-change behavior, the loader seam's call order, and the staleness
+  predicate.
+
+### Out of scope
+
+- Highlighting only the visible viewport, windowed or incremental highlighting,
+  lazy per-hunk highlighting, a highlight line budget, or skipping highlighting
+  for large files.
+- Replacing the single diff `Static` with a virtualized or `render_line`-based
+  widget, adding per-row widgets, changing the widget tree, or changing the
+  sidebar/diff layout and dimensions.
+- Changes to `gitpane/git.py`, `gitpane/diff.py`, `gitpane/model.py`,
+  `gitpane/__init__.py`, `gitpane/app.tcss`, or to source reconstruction, lexer
+  selection, `Syntax` construction, token styles, gutter format, markers, or
+  addition/removal backgrounds.
+- Making `git.status()`, stage, or unstage asynchronous; adding cancellation UI,
+  progress percentages, spinners other than Textual's existing loading state,
+  timeouts, retries, or error dialogs.
+- File watching, automatic refresh, debounce, selection restoration, or any
+  other Step 6 watcher work from `docs/design-spec.md`.
+- A general cache framework, cache configuration or statistics UI, disk
+  persistence, a controller/service/dependency-injection layer, an async Git
+  API, a process pool, or any speculative extension point.
+- New dependencies or changes to `pyproject.toml` and `uv.lock`.
+- Tests that call `App.run()`, `App.run_test()`, use a Pilot or event loop,
+  start a real worker or thread, invoke Git/subprocesses, create repositories,
+  or perform terminal, browser, editor, app, or smoke checks.
+- Benchmarks, profiling harnesses, timing assertions, or performance-regression
+  tests in the suite; measured performance confirmation is user-owned.
+
+## Locked decisions
+
+| Area | Decision |
+| --- | --- |
+| Owned implementation files | Implementation may edit only `gitpane/app.py` and `tests/test_app.py`. Do not edit `gitpane/app.tcss`, other source or test modules, dependencies, lockfiles, or documentation during a story. The orchestrator alone updates this status table. |
+| Prepared value | Add one frozen dataclass `DiffView` in `gitpane/app.py` with exactly two fields: `text: Text` and `first_change: int | None`. It is the complete result of preparing a selection. Do not store rows, the raw patch, the entry, timestamps, sizes, or widget state on it, and do not add methods beyond what the dataclass generates. |
+| Build step | Add `build_diff_view(entry: FileEntry, patch: str) -> DiffView` that calls `diff.parse(patch)` once, then `render_diff_rows(entry, rows)` once, then `diff.first_change_index(rows)` once, and returns the `DiffView`. It takes the already-read patch text so the cache key is content-derived; it must not call `git.diff`, touch widgets, or read application state. |
+| Cache mechanism | Cache by decorating `build_diff_view` with `functools.lru_cache(maxsize=4)`. `FileEntry` is a frozen dataclass and `str` is hashable, so the arguments are usable as-is. Do not write a custom cache class, an `OrderedDict`, a `DiffCache` type, a cache module, eviction policy options, or cache statistics reporting. |
+| Cache key and invalidation | The key is exactly `(entry, patch)`: the entry value plus the raw patch string. Content is therefore part of the key, so staging, unstaging, refreshing, or any external edit that changes the diff produces a different key and cannot return a stale view. There is no manual invalidation: never call `cache_clear` from production code on refresh, mutation, selection, or shutdown. Do not hash, truncate, normalize, or otherwise derive the key from the patch, and do not key on path alone. Bounding at four entries keeps memory predictable for large files while still serving an A → B → A revisit. |
+| Loader seam | Add `load_diff_view(root: Path, entry: FileEntry) -> DiffView` that calls `git.diff(root, entry)` once and returns `build_diff_view(entry, patch)`. This function is the entire body of the thread worker and is directly callable in tests. Replace `load_diff_rows` with it; `load_diff_rows` and its test are removed rather than kept as a second unused path. |
+| Worker | `on_list_view_selected` stays a plain synchronous handler that assigns `selection`, advances the request token, sets the loading state, and starts a thread worker. Use `@work(thread=True, exclusive=True, group="diff")` on a small `GitPaneApp` method whose body only calls `load_diff_view` and then hands the result to the main thread with `App.call_from_thread`. Thread workers cannot be interrupted mid-highlight, so `exclusive=True` is an optimization only and never a substitute for the staleness guard. Do not make Git or highlighting async, add an async worker, use `run_worker` with a lambda, spawn raw `threading`/`concurrent.futures` objects, or put logic other than those two calls inside the decorated method. |
+| Request token | `GitPaneApp` holds an integer `request_id` starting at `0`. Increment it in `on_list_view_selected` before starting a worker and in `refresh_status` before rebuilding the lists, then pass the current value into the worker. The applying method returns immediately unless the token still matches. Express the comparison as the pure module-level predicate `is_current_request(token: int, current: int) -> bool` returning `token == current`, and test that predicate directly. Do not compare selections, paths, or worker identities instead of the token, and do not reuse or reset the counter. |
+| Applying a result | The applying method is a small `GitPaneApp` method that returns early when the request is not current, and otherwise updates the one diff `Static`, clears the loading state, scrolls the diff container to the origin, and, when `first_change` is not `None`, schedules the existing `call_after_refresh` scroll to that row. Keep the visible result byte-for-byte identical to today's synchronous behavior; only its timing changes. Widget access stays inside this method so every other piece remains testable without a mounted app. |
+| Loading state | Set `loading` to `True` on the existing `#diff-scroll` `VerticalScroll` when a request starts and to `False` when a current result is applied or when `refresh_status` clears the pane. Use only Textual's built-in `Widget.loading` reactive; do not add a widget, ID, TCSS rule, message, notification, status line, or text placeholder. A superseded result must not clear the loading state of the request that replaced it. |
+| Refresh and mutation | `refresh_status` keeps its existing synchronous `git.status` call, list rebuild, selection clearing, diff clearing, and focus behavior, and additionally advances the request token and clears the loading state. Stage/unstage keep calling `toggle_file` synchronously followed by the same full refresh. Do not preload, prefetch, or re-select a diff after refresh. |
+| Test seam | Keep the tests helper-level: call `build_diff_view`, `load_diff_view`, and `is_current_request` directly with literal `FileEntry`/`Row` values, monkeypatched `git.diff`/`diff.parse`/`render_diff_rows`, and recording fakes. Prove caching by counting monkeypatched calls, and call `build_diff_view.cache_clear()` in a fixture so cases are independent. Do not instantiate or run `GitPaneApp`, construct widgets, fabricate Textual events, start a worker or thread, or assert on wall-clock timings. |
+| Dependencies | Use only the existing `textual`/`rich` packages and the standard library. Do not add a profiling, benchmarking, caching, async, or Textual testing package, and do not regenerate `uv.lock`. |
+
+## Story execution rules
+
+Each story must be dispatched with its specification, this milestone's full
+scope and locked decisions, exact paths, and the Required Coder-Prompt Rules
+from `docs/workflow.md`: **Do NOT boot the editor/application or run any
+browser/smoke test.** **NEVER use `git stash`, `git checkout --`, or `git
+restore` on any file not intentionally edited for this task; if something
+unexpected changes, stop and report it.** Escalate unresolved architectural
+decisions to the senior coder rather than guessing. Use
+`PYTHONDONTWRITEBYTECODE=1` for Python checks. A coder must not start another
+story, commit, or update this status table. Verification must not call
+`App.run()`, `App.run_test()`, use a Pilot/event loop, start a worker or thread,
+invoke `python -m gitpane.app`/`textual run`, or perform a terminal, app,
+browser, editor, or smoke check.
+
+## Story status
+
+| Story | Title | Status |
+| --- | --- | --- |
+| 1 | Extract and cache the prepared diff view | Complete |
+| 2 | Load diffs on a worker with a request-generation guard | Pending |
+| 3 | Final cleanup and milestone verification | Pending |
+
+## Story 1: Extract and cache the prepared diff view
+
+### Files
+
+- Edit `gitpane/app.py`.
+- Edit `tests/test_app.py`.
+- Do not edit `gitpane/app.tcss`, `gitpane/git.py`, `gitpane/diff.py`,
+  `gitpane/model.py`, `pyproject.toml`, `uv.lock`, or any other file.
+
+### Work
+
+1. Add the frozen `DiffView` dataclass with exactly `text: Text` and
+   `first_change: int | None`.
+2. Add `build_diff_view(entry, patch)` performing exactly one `diff.parse`, one
+   `render_diff_rows`, and one `diff.first_change_index` call, and returning the
+   `DiffView`. Do not read Git, widgets, or application state inside it.
+3. Decorate `build_diff_view` with `functools.lru_cache(maxsize=4)`. Add no
+   other caching code, wrapper, or configuration.
+4. Add `load_diff_view(root, entry)` that calls `git.diff(root, entry)` once and
+   returns `build_diff_view(entry, patch)`.
+5. Remove `load_diff_rows` and change `on_list_view_selected` to call
+   `load_diff_view`, then update the diff `Static` with `view.text`, then use
+   `view.first_change` for the existing origin-and-first-change scrolling. The
+   handler stays synchronous in this story; only the seam changes.
+6. Replace the `load_diff_rows` test with tests for the new seam: prove
+   `load_diff_view` forwards the exact root and entry to `git.diff` and the
+   unchanged patch to the builder, in that order, and that it returns the
+   built view unchanged.
+7. Test `build_diff_view` directly with literal rows: exact rendered text,
+   `first_change` for a diff with changes, and `None` for an all-context diff.
+8. Test the cache with monkeypatched `diff.parse`/`render_diff_rows` call
+   counters: a repeated identical `(entry, patch)` pair builds once; the same
+   entry with a different patch builds again and returns the new content; a
+   different entry with the same patch builds again; and a fifth distinct key
+   evicts the oldest so it rebuilds. Add a fixture calling
+   `build_diff_view.cache_clear()` before each test so cases are independent.
+
+### Acceptance criteria
+
+- Preparing a selection is one pure function of `(entry, patch)` returning one
+  immutable `DiffView`, and the rendered output is identical to Milestone 6.
+- Re-selecting a file whose patch text is unchanged reuses the cached view
+  without re-parsing or re-highlighting.
+- Any content change to a file's diff, including stage, unstage, refresh, or an
+  external edit, changes the cache key and therefore cannot show stale content;
+  no production code calls `cache_clear`.
+- At most four prepared views are retained and the oldest is evicted.
+- `load_diff_rows` is gone, with no second or duplicated loading path left
+  behind.
+- Rendering, highlighting, gutters, markers, colors, scrolling, selection,
+  staging, refresh, and layout are otherwise unchanged.
+- Tests call helpers directly with fakes and never start Textual, a worker, a
+  thread, or Git.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py
+git diff --check -- gitpane/app.py tests/test_app.py
+git status --short
+```
+
+Do not run `python -m gitpane.app`, `textual run`, `run_test()`, a Pilot, real
+Git commands from tests, or any app/terminal/browser/editor/smoke check.
+
+## Story 2: Load diffs on a worker with a request-generation guard
+
+### Files
+
+- Edit `gitpane/app.py`.
+- Edit `tests/test_app.py`.
+- Do not edit `gitpane/app.tcss`, `gitpane/git.py`, `gitpane/diff.py`,
+  `gitpane/model.py`, `pyproject.toml`, `uv.lock`, or any other file.
+
+### Work
+
+1. Add the pure predicate `is_current_request(token, current)` returning
+   `token == current`, and add the `request_id` integer attribute initialized to
+   `0` in `GitPaneApp.__init__`.
+2. Change `on_list_view_selected` so it assigns `selection`, increments
+   `request_id`, sets `loading` to `True` on the `#diff-scroll` container, and
+   starts the thread worker with the current token. It must no longer call
+   `load_diff_view`, render, or scroll directly.
+3. Add the `@work(thread=True, exclusive=True, group="diff")` method whose body
+   only calls `load_diff_view(self.root, entry)` and then hands the resulting
+   view and the token to the applying method through `self.call_from_thread`.
+   Put no branching, widget access, or error handling in it.
+4. Add the applying method: return immediately unless `is_current_request`
+   holds for the passed token and the current `request_id`; otherwise update the
+   diff `Static` with `view.text`, clear the loading state, scroll to the
+   origin, and schedule the existing `call_after_refresh` first-change scroll
+   when `view.first_change` is not `None`.
+5. Increment `request_id` in `refresh_status` before rebuilding the lists and
+   clear the loading state there, so a diff still being prepared when the user
+   refreshes, stages, or unstages can never paint over the cleared pane.
+6. Test `is_current_request` directly for an equal token, a superseded lower
+   token, and a higher token.
+7. Test that `load_diff_view` remains directly callable and unchanged in
+   behavior when invoked outside any worker, so the whole CPU-bound path stays
+   verifiable synchronously.
+8. Do not instantiate `GitPaneApp`, mount widgets, fabricate a `ListView.Selected`
+   event, run a worker, or start a thread in tests. Worker wiring, the loading
+   state, and widget updates are verified by review, types, lint, and the
+   user-owned application check.
+
+### Acceptance criteria
+
+- Selecting a file returns control to the event loop immediately; the Git read,
+  parse, highlight, and row composition happen on a thread worker.
+- The diff container shows Textual's built-in loading state while a request is
+  in flight and clears it when that request's result is applied.
+- Selecting file A and then file B before A finishes always leaves B's diff
+  displayed; A's late result is dropped by the token guard.
+- A refresh, stage, or unstage supersedes any in-flight request, so a late
+  result cannot repaint a cleared pane.
+- Cached views still short-circuit the expensive work inside the worker, and the
+  displayed result is identical to the previous synchronous behavior.
+- No new dependency, widget, ID, TCSS rule, message type, async Git call, raw
+  thread, error dialog, or cancellation UI is introduced.
+- Tests remain pure and non-interactive, with no app, worker, thread, event
+  loop, Pilot, or Git invocation.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run pytest tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane/app.py tests/test_app.py
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane/app.py tests/test_app.py
+git diff --check -- gitpane/app.py tests/test_app.py
+git status --short
+```
+
+Do not run `python -m gitpane.app`, `textual run`, `run_test()`, a Pilot, a real
+worker or thread, Git commands from tests, or any
+app/terminal/browser/editor/smoke check.
+
+## Story 3: Final cleanup and milestone verification
+
+### Files
+
+- Review and, only when a Milestone 7 fix is required, edit `gitpane/app.py`.
+- Review and, only when a Milestone 7 fix is required, edit `tests/test_app.py`.
+- Do not modify `gitpane/app.tcss`, other source or test modules, dependencies,
+  lockfiles, or documentation; status-table updates and commits remain the
+  orchestrator's responsibility.
+
+### Work
+
+1. Review the complete Milestone 7 diff for accidental complexity, a leftover
+   synchronous loading path, duplicated apply/scroll logic, unused helpers or
+   imports, debug output, and work outside the scope boundary.
+2. Confirm the cache is exactly one `lru_cache(maxsize=4)` on
+   `build_diff_view`, keyed on `(entry, patch)`, with no manual invalidation,
+   custom cache type, or path-only key that could show stale content after a
+   stage, unstage, or refresh.
+3. Confirm the decorated worker method contains only the load-and-hand-off
+   calls, that all decision logic lives in `load_diff_view`,
+   `build_diff_view`, and `is_current_request`, and that widget access is
+   confined to the applying method and `refresh_status`.
+4. Confirm the token is incremented on both selection and refresh, that the
+   applying method returns early for a superseded token without clearing the
+   newer request's loading state, and that the rendered diff, gutters, colors,
+   markers, and first-change scrolling match Milestone 6 exactly.
+5. Confirm no highlighting was made viewport-dependent, no widget was replaced
+   or virtualized, and `gitpane/git.py`, `gitpane/diff.py`, `gitpane/model.py`,
+   and `gitpane/app.tcss` are untouched.
+6. Confirm tests exercise only helper functions with literals and fakes, with no
+   app instantiation, widget construction, fabricated event, worker, thread,
+   event loop, Git subprocess, temporary repository, or timing assertion.
+7. Apply only fixes needed for this milestone, then run the full static and unit
+   checks below once with bytecode writing disabled.
+8. Inspect the owned-file diff and `git status --short` for unintended files or
+   generated artifacts. Stop and report anything unexpected rather than using a
+   destructive Git command.
+9. Leave this status table and all commits to the orchestrator as required by
+   `docs/workflow.md`.
+
+### Acceptance criteria
+
+- All Milestone 7 and prior acceptance criteria hold together.
+- The implementation is the smallest clear fix for the measured freeze: one
+  prepared-view dataclass, one cached pure builder, one loader seam, one thread
+  worker, one token predicate, and one applying method.
+- Selection no longer blocks the event loop, revisiting an unchanged diff avoids
+  re-highlighting, and superseded results are discarded.
+- Diff content, syntax highlighting, theme colors, layout, list interaction,
+  staging, and manual refresh are unchanged; no watcher work has started.
+- Ruff formatting/lint, strict mypy, and the complete pytest suite pass.
+- Only `gitpane/app.py` and `tests/test_app.py` changed, with no dependency,
+  metadata, lockfile, stylesheet, or documentation edit.
+- No application, worker, thread, Pilot, event loop, Git subprocess, terminal
+  UI, editor, browser, or smoke process was run.
+
+### Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 uv run ruff check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run ruff format --check gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run mypy gitpane tests
+PYTHONDONTWRITEBYTECODE=1 uv run pytest
+git diff --check -- gitpane/app.py tests/test_app.py
+git status --short
+```
+
+There is deliberately no dependency sync, `python -m gitpane.app`, `textual
+run`, `run_test()`, Pilot, benchmark, profiler, app, terminal UI, editor,
+browser, or smoke verification command. The user owns confirming responsiveness
+and reproducing the large-file profiling measurement after the milestone lands.
