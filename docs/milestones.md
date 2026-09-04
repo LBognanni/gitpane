@@ -198,3 +198,226 @@ uv run pytest
 uv run python -m gitpane.git
 git status --short
 ```
+
+
+# Milestone 2: Unified diff parsing
+
+## Goal
+
+Implement Step 3 of `docs/design-spec.md`: parse unified-diff text with
+`unidiff.PatchSet` into an ordered flat list of typed `Row` values, locate the
+first changed row, and provide a small module entry point that reads a unified
+diff from standard input and prints the total row count and first-change index.
+The milestone is complete when a representative diff can be piped to
+`uv run python -m gitpane.diff` and the expected summary is printed.
+
+Repository baseline: Milestone 1 is complete. The package, strict mypy/Ruff/
+pytest tooling, status model, and status parser already exist. There is no diff
+module or runtime dependency yet. The existing `docs/workflow.md` change is
+unrelated to this milestone and must be left untouched.
+
+## Scope boundary
+
+### In scope
+
+- The `unidiff` runtime dependency and regenerated `uv.lock`.
+- Parsing ordinary textual unified diffs through `unidiff.PatchSet`.
+- One immutable, tuple-compatible `Row` record with `old_no`, `new_no`, `text`,
+  and `kind` fields.
+- Flattening all parsed files and hunks into rows in patch order.
+- Context, addition, and removal rows, including their applicable old/new line
+  numbers.
+- A zero-based first-change lookup.
+- A minimal standard-input module entry point for the stated printing
+  milestone.
+- Focused tests of GitPane's row mapping, ordering, first-change lookup, and
+  summary output using literal unified-diff text.
+
+### Out of scope
+
+- Changes to `gitpane/git.py`, including adding the Step 2 `diff()`, `stage()`,
+  or `unstage()` Git commands and untracked-file handling.
+- Invoking Git or testing Git's behavior.
+- Side-by-side diff alignment, hunk or line staging, rename, conflict, binary,
+  malformed-patch, or combined-diff support.
+- File headers, hunk headers, and `\\ No newline at end of file` markers as
+  rendered rows.
+- Syntax highlighting, full-file reconstruction, UI/Textual work, scrolling,
+  file watching, caching, or threading.
+- Command-line arguments, reading a named file, output styling, or a reusable
+  reporting/formatting abstraction.
+- Changes to `gitpane/model.py`, `gitpane/__init__.py`, `README.md`,
+  `docs/design-spec.md`, or `docs/workflow.md`.
+- Booting the application or performing browser/smoke testing.
+
+## Locked decisions
+
+| Area | Decision |
+| --- | --- |
+| Public module API | Create `gitpane/diff.py` with `parse(text: str) -> list[Row]`, `first_change_index(rows: Sequence[Row]) -> int | None`, and `main() -> None`. Do not re-export these names from `gitpane/__init__.py`. |
+| Row representation | Implement `Row` as a typed `typing.NamedTuple`, the typed equivalent of the design's `namedtuple`, with fields in exactly this order: `old_no: int | None`, `new_no: int | None`, `text: str`, and `kind: Literal["context", "add", "remove"]`. Do not add methods or metadata fields. |
+| Parser | Construct `unidiff.PatchSet` directly from the supplied string. Iterate files, hunks, and lines in library order and return one flat list; do not retain file/hunk objects or create an intermediate domain model. Let `unidiff` parsing errors propagate without translation. |
+| Line mapping | Map context to both source and target line numbers, removal to source only, and addition to target only, using the line numbers supplied by `unidiff`. Map kinds to exactly `context`, `remove`, and `add`. |
+| Row text | Use the patch line's content without its diff marker. Remove at most one terminal line ending (`\n`, and a preceding `\r` when present); preserve all other whitespace and do not synthesize a newline for a final unterminated line. |
+| Patch metadata | Emit rows only for context/add/remove lines inside hunks. Patch/file headers, hunk headers, and no-newline markers are not rows. Empty patches produce an empty list. |
+| First change | Return the zero-based index of the first row whose kind is `add` or `remove`. Return `None` for an empty list or an all-context list. Do not prefer additions over removals or offset the index for future UI chrome. |
+| Printing milestone | `main()` reads all unified-diff text from `sys.stdin`, parses it, and prints exactly two lines: `Rows: N` and `First change: I`, where `I` is the integer index or `None`. Keep the `if __name__ == "__main__"` guard; add no argument parser or Git integration. |
+| Dependency | Add `unidiff>=1.0.0` as the sole `[project]` runtime dependency and regenerate `uv.lock` through `uv add`/`uv lock`; never hand-edit the lockfile. Add no development dependency or import suppression: unidiff 1.x publishes inline typing metadata, so its `PatchSet` import must pass strict mypy without an ignore. |
+| Testing | Add `tests/test_diff.py` with literal patch strings. Test GitPane's transformation and output, not `unidiff` internals and not Git. No fixture file, subprocess test, temporary repository, snapshot library, or mocking framework is needed. |
+
+## Story status
+
+| Story | Title | Status |
+| --- | --- | --- |
+| 1 | Add the dependency and flatten unified diffs into rows | Complete |
+| 2 | Locate the first change and print the diff summary | Pending |
+| 3 | Final cleanup and milestone verification | Pending |
+
+## Story 1: Add the dependency and flatten unified diffs into rows
+
+### Files
+
+- Edit `pyproject.toml`.
+- Regenerate `uv.lock`; do not hand-edit it.
+- Create `gitpane/diff.py`.
+- Create `tests/test_diff.py`.
+
+### Work
+
+1. Add `unidiff>=1.0.0` as a runtime dependency with `uv`, retaining the
+   existing development dependency group and tool configuration unchanged.
+2. Define the typed `Row` record and `parse()` API according to the locked
+   contracts above. Import `unidiff.PatchSet` without a type-ignore comment.
+3. Flatten every file and hunk in patch order. Map context, removal, and
+   addition lines to the exact kinds and nullable source/target numbers above.
+4. Strip only the line terminator from each value. Do not strip indentation or
+   trailing spaces, and do not include diff markers or patch metadata.
+5. Add focused tests using literal unified diffs that cover:
+   - context, removal, and addition field mapping and zero/one-sided numbers;
+   - text with leading and trailing spaces;
+   - multiple hunks and multiple files remaining in source order;
+   - an empty patch returning an empty list;
+   - a final changed line without a newline not losing content.
+6. Do not add first-change or command-line behavior in this story; those belong
+   to Story 2.
+
+### Acceptance criteria
+
+- `parse()` uses `PatchSet` and returns only flat `Row` values in patch order.
+- Every row has the exact field order, value types, kind spelling, line-number
+  mapping, and text normalization in the locked decisions.
+- Multi-file and multi-hunk input is flattened without sorting, grouping, or
+  dropping rows.
+- Empty unified-diff text returns `[]`.
+- Parser/library failures are not hidden behind fallback behavior or custom
+  exceptions.
+- `unidiff` is the only new dependency, the strict project tooling remains
+  enabled, and the generated lockfile agrees with project metadata.
+- Tests exercise application mapping only and never invoke Git.
+
+### Verification
+
+```bash
+uv sync --dev
+uv run pytest tests/test_diff.py
+uv run ruff check gitpane/diff.py tests/test_diff.py
+uv run ruff format --check gitpane/diff.py tests/test_diff.py
+uv run mypy gitpane/diff.py tests/test_diff.py
+```
+
+## Story 2: Locate the first change and print the diff summary
+
+### Files
+
+- Edit `gitpane/diff.py`.
+- Edit `tests/test_diff.py`.
+
+### Work
+
+1. Add `first_change_index()` as a simple ordered scan over a `Sequence[Row]`.
+2. Return the first add/remove index, including `0` when the first row is a
+   change, and return `None` for empty or context-only input.
+3. Add `main()` and its module guard. Read standard input once, call `parse()`,
+   then print exactly the locked two-line summary.
+4. Test first-change behavior for a leading change, context before a change,
+   an all-context sequence, and an empty sequence.
+5. Test `main()` in-process by replacing standard input and capturing standard
+   output with pytest. Use a literal valid patch and assert the complete output;
+   do not spawn Python or Git from the test.
+
+### Acceptance criteria
+
+- First-change indexes are zero-based and refer directly to the flat row list.
+- Context rows are skipped, while either removal or addition is a change.
+- No-change input returns and prints `None` without an exception.
+- `uv run python -m gitpane.diff` accepts a unified diff on standard input and
+  prints only the exact row-count and first-change lines.
+- Importing `gitpane.diff` does not read input or print output.
+- No CLI framework, Git integration, or UI behavior is introduced.
+
+### Verification
+
+```bash
+uv run pytest tests/test_diff.py
+uv run ruff check gitpane/diff.py tests/test_diff.py
+uv run ruff format --check gitpane/diff.py tests/test_diff.py
+uv run mypy gitpane/diff.py tests/test_diff.py
+printf '%s\n' '--- a/example.txt' '+++ b/example.txt' '@@ -1,2 +1,2 @@' ' same' '-old' '+new' | uv run python -m gitpane.diff
+```
+
+The final command must print exactly:
+
+```text
+Rows: 3
+First change: 1
+```
+
+## Story 3: Final cleanup and milestone verification
+
+### Files
+
+- Review and, only when a fix is required, edit `pyproject.toml`.
+- Regenerate, but never hand-edit, `uv.lock` if metadata changed.
+- Review and, only when a fix is required, edit `gitpane/diff.py`.
+- Review and, only when a fix is required, edit `tests/test_diff.py`.
+
+### Work
+
+1. Review the complete Milestone 2 diff for accidental complexity, duplicated
+   parsing, broad type suppressions, stale imports, debug output, and work
+   outside this milestone's scope.
+2. Confirm `PatchSet` remains the sole parser and the implementation has no
+   speculative renderer, Git command, UI, or later-step abstraction.
+3. Apply only fixes needed to satisfy this milestone, then run the complete
+   project checks and the standard-input printing milestone once.
+4. Confirm the dependency metadata and generated lockfile agree and that no
+   cache, virtual-environment, coverage, or build artifacts are included in the
+   intended diff.
+5. Confirm `docs/workflow.md` and all other out-of-scope files remain untouched.
+   Leave status-table updates and commits to the orchestrator as required by
+   `docs/workflow.md`.
+
+### Acceptance criteria
+
+- All Milestone 2 story acceptance criteria hold together.
+- The module remains the smallest clear implementation of unified-diff parsing,
+  first-change lookup, and the stated printing milestone.
+- The full existing and new test suite passes without testing Git itself.
+- Ruff formatting/lint and strict mypy checks pass for the package and tests.
+- The representative standard-input invocation prints the exact expected
+  summary and no extra output.
+- Only Milestone 2-owned implementation files are changed; generated/local
+  artifacts are absent and the unrelated `docs/workflow.md` is untouched.
+- No application, editor, UI, browser, or smoke process is booted.
+
+### Verification
+
+```bash
+uv sync --dev
+uv run ruff check gitpane tests
+uv run ruff format --check gitpane tests
+uv run mypy gitpane tests
+uv run pytest
+printf '%s\n' '--- a/example.txt' '+++ b/example.txt' '@@ -1,2 +1,2 @@' ' same' '-old' '+new' | uv run python -m gitpane.diff
+git status --short
+```
