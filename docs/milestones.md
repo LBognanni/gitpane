@@ -271,7 +271,7 @@ unrelated to this milestone and must be left untouched.
 | --- | --- | --- |
 | 1 | Add the dependency and flatten unified diffs into rows | Complete |
 | 2 | Locate the first change and print the diff summary | Complete |
-| 3 | Final cleanup and milestone verification | Pending |
+| 3 | Final cleanup and milestone verification | Complete |
 
 ## Story 1: Add the dependency and flatten unified diffs into rows
 
