@@ -35,7 +35,6 @@ Every coder story dispatch must include these explicit rules:
   this task. If something unexpected changes, STOP and report it."** Never self-heal with destructive git
   commands.
 - If a coder is stuck on an architectural decision, tell it to escalate to `senior-coder` rather than guess.
-- Run `slopocop` against any changed files and fix any reported issues.
 
 ## Other Locked Decisions
 
