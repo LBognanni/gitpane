@@ -790,7 +790,7 @@ story, commit, or update this status table.
 | --- | --- | --- |
 | 1 | Add Textual and compose the status panes | Complete |
 | 2 | Load and render selected diffs | Complete |
-| 3 | Add keyboard and prefix-click stage toggles | Not started |
+| 3 | Add keyboard and prefix-click stage toggles | Complete |
 | 4 | Final cleanup and milestone verification | Not started |
 
 ## Story 1: Add Textual and compose the status panes
