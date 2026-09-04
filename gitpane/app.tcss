@@ -1,23 +1,83 @@
+$canvas: #0d1117;
+$surface: #161b22;
+$raised-surface: #21262d;
+$inactive-selection: #30363d;
+$text: #f0f3f6;
+$muted-text: #b1bac4;
+$border: #6e7681;
+$accent: #58a6ff;
+$focus: #f2cc60;
+$focused-selection: #174ea6;
+$addition-background: #142b1d;
+$removal-background: #351b20;
+
+Screen {
+    background: $canvas;
+    color: $text;
+}
+
 #body {
     height: 1fr;
+    background: $canvas;
+    color: $text;
 }
 
 #sidebar {
     width: 30;
     min-width: 30;
     max-width: 30;
+    background: $surface;
+    border-right: solid $border;
+}
+
+#sidebar > Static {
+    background: $raised-surface;
+    color: $muted-text;
+    text-style: bold;
 }
 
 #staged-list,
 #unstaged-list {
     height: 1fr;
+    background: $surface;
+    color: $text;
+    border: solid $border;
+}
+
+ListView > ListItem {
+    background: $surface;
+    color: $text;
+}
+
+ListView > ListItem:hover {
+    background: $raised-surface;
+}
+
+ListView > ListItem.--highlight {
+    background: $inactive-selection;
+    color: $text;
+}
+
+ListView:focus {
+    border: solid $focus;
+}
+
+ListView:focus > ListItem.--highlight {
+    background: $focused-selection;
+    color: $text;
+    text-style: bold;
 }
 
 #diff-scroll {
     overflow: scroll scroll;
+    background: $canvas;
+    color: $text;
+    scrollbar-color: $accent;
 }
 
 #diff {
     width: auto;
     text-wrap: nowrap;
+    background: $canvas;
+    color: $text;
 }
