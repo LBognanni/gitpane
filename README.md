@@ -34,6 +34,7 @@ show its diff in the right pane. Long lines can be scrolled horizontally.
 
 ## Current Scope
 
-GitPane supports whole-file staging and unstaging plus unified diffs. It does
-not yet support hunk or line staging, commits, conflict resolution, renames,
-binary files, syntax highlighting, or automatic file watching.
+GitPane supports whole-file staging and unstaging plus syntax-highlighted,
+unified diffs in an accessible dark theme. It does not yet support hunk or
+line staging, commits, conflict resolution, renames, binary files, or
+automatic file watching.
