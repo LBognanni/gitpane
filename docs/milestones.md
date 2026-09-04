@@ -291,7 +291,7 @@ artifacts are not rewritten.
 | Story | Title | Status |
 | --- | --- | --- |
 | 1 | Build staged, unstaged, and untracked diff commands | Complete |
-| 2 | Add whole-file stage and unstage commands | Planned |
+| 2 | Add whole-file stage and unstage commands | Complete |
 | 3 | Final cleanup and milestone verification | Planned |
 
 ## Story 1: Build staged, unstaged, and untracked diff commands
