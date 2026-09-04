@@ -3,9 +3,11 @@ from typing import ClassVar
 
 from rich.style import Style
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.widgets import ListItem, ListView, Static
 
 from gitpane import diff, git
@@ -21,6 +23,19 @@ def format_file_label(entry: FileEntry) -> str:
 def load_diff_rows(root: Path, entry: FileEntry) -> list[Row]:
     """Load and parse the diff for an entry."""
     return diff.parse(git.diff(root, entry))
+
+
+def toggle_file(root: Path, entry: FileEntry) -> None:
+    """Stage or unstage an entry according to its side."""
+    if entry.side is Side.STAGED:
+        git.unstage(root, entry.path)
+    else:
+        git.stage(root, entry.path)
+
+
+def is_prefix_offset(offset: int) -> bool:
+    """Return whether an item-local offset is within the toggle prefix."""
+    return 0 <= offset <= 2
 
 
 def render_diff_rows(rows: list[Row]) -> Text:
@@ -48,14 +63,32 @@ def render_diff_rows(rows: list[Row]) -> Text:
 class FileItem(ListItem):
     """A status entry displayed in a file list."""
 
+    class ToggleRequested(Message):
+        """Request that an entry be staged or unstaged."""
+
+        def __init__(self, entry: FileEntry) -> None:
+            self.entry = entry
+            super().__init__()
+
     def __init__(self, entry: FileEntry) -> None:
         self.entry = entry
         super().__init__(Static(format_file_label(entry), markup=False))
 
+    def _on_click(self, event: events.Click) -> None:  # type: ignore[override]
+        offset = event.get_content_offset(self)
+        if offset is not None and is_prefix_offset(offset.x):
+            event.stop()
+            self.post_message(self.ToggleRequested(self.entry))
+            return
+        self.post_message(self._ChildClicked(self))
+
 
 class GitPaneApp(App[None]):
     CSS_PATH = "app.tcss"
-    BINDINGS: ClassVar[list[BindingType]] = [Binding("r", "refresh", "Refresh")]
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("r", "refresh", "Refresh"),
+        Binding("space", "toggle_file", "Toggle"),
+    ]
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -80,6 +113,15 @@ class GitPaneApp(App[None]):
 
     async def action_refresh(self) -> None:
         await self.refresh_status()
+
+    async def action_toggle_file(self) -> None:
+        focused = self.focused
+        if not isinstance(focused, ListView):
+            return
+        item = focused.highlighted_child
+        if not isinstance(item, FileItem):
+            return
+        await self.toggle_entry(item.entry)
 
     async def refresh_status(self) -> None:
         state = git.status(self.root)
@@ -119,6 +161,15 @@ class GitPaneApp(App[None]):
             self.call_after_refresh(
                 diff_scroll.scroll_to, 0, first_change, animate=False
             )
+
+    async def on_file_item_toggle_requested(
+        self, event: FileItem.ToggleRequested
+    ) -> None:
+        await self.toggle_entry(event.entry)
+
+    async def toggle_entry(self, entry: FileEntry) -> None:
+        toggle_file(self.root, entry)
+        await self.refresh_status()
 
 
 def main() -> None:

@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 from rich.style import Style
 
-from gitpane.app import format_file_label, load_diff_rows, render_diff_rows
+from gitpane.app import (
+    format_file_label,
+    is_prefix_offset,
+    load_diff_rows,
+    render_diff_rows,
+    toggle_file,
+)
 from gitpane.diff import Row
 from gitpane.model import FileEntry, Side
 
@@ -73,3 +79,76 @@ def test_render_diff_rows_preserves_empty_rows_without_extra_newlines() -> None:
 
     assert rendered.plain == "            "
     assert rendered.spans == []
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected_call"),
+    [
+        (
+            FileEntry("staged path.txt", Side.STAGED, "M"),
+            ("unstage", "staged path.txt"),
+        ),
+        (
+            FileEntry("unstaged path.txt", Side.UNSTAGED, "M"),
+            ("stage", "unstaged path.txt"),
+        ),
+        (
+            FileEntry("untracked path.txt", Side.UNSTAGED, "?"),
+            ("stage", "untracked path.txt"),
+        ),
+    ],
+)
+def test_toggle_file_dispatches_by_side_and_preserves_path(
+    monkeypatch: pytest.MonkeyPatch,
+    entry: FileEntry,
+    expected_call: tuple[str, str],
+) -> None:
+    root = Path("/repo")
+    calls: list[tuple[str, Path, str]] = []
+
+    def fake_stage(received_root: Path, path: str) -> None:
+        calls.append(("stage", received_root, path))
+
+    def fake_unstage(received_root: Path, path: str) -> None:
+        calls.append(("unstage", received_root, path))
+
+    monkeypatch.setattr("gitpane.app.git.stage", fake_stage)
+    monkeypatch.setattr("gitpane.app.git.unstage", fake_unstage)
+
+    assert toggle_file(root, entry) is None  # type: ignore[func-returns-value]
+    assert calls == [(expected_call[0], root, expected_call[1])]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        FileEntry("staged.txt", Side.STAGED, "M"),
+        FileEntry("unstaged.txt", Side.UNSTAGED, "M"),
+    ],
+)
+def test_toggle_file_propagates_git_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    entry: FileEntry,
+) -> None:
+    sentinel = RuntimeError("stage failed")
+
+    def fake_mutation(_: Path, __: str) -> None:
+        raise sentinel
+
+    monkeypatch.setattr("gitpane.app.git.stage", fake_mutation)
+    monkeypatch.setattr("gitpane.app.git.unstage", fake_mutation)
+
+    with pytest.raises(RuntimeError) as raised:
+        toggle_file(Path("/repo"), entry)
+
+    assert raised.value is sentinel
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    [(-1, False), (0, True), (2, True), (3, False)],
+)
+def test_is_prefix_offset_includes_only_checkbox_columns(
+    offset: int, expected: bool
+) -> None:
+    assert is_prefix_offset(offset) is expected
