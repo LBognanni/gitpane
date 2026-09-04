@@ -9,6 +9,7 @@ from gitpane.app import (
     build_diff_view,
     format_file_label,
     highlight_new_lines,
+    is_current_request,
     is_prefix_offset,
     lexer_for_entry,
     load_diff_view,
@@ -66,6 +67,20 @@ def test_load_diff_view_forwards_root_and_entry_to_git_diff_then_builds(
 
     assert load_diff_view(root, entry) is view
     assert calls == [("diff", root, entry), ("build", entry, patch)]
+
+
+@pytest.mark.parametrize(
+    ("token", "current", "expected"),
+    [
+        (3, 3, True),
+        (2, 3, False),
+        (4, 3, False),
+    ],
+)
+def test_is_current_request_matches_only_the_current_token(
+    token: int, current: int, expected: bool
+) -> None:
+    assert is_current_request(token, current) is expected
 
 
 def test_build_diff_view_renders_the_exact_text_of_render_diff_rows(

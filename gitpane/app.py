@@ -7,7 +7,7 @@ from typing import ClassVar
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
-from textual import events
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -45,6 +45,11 @@ def load_diff_view(root: Path, entry: FileEntry) -> DiffView:
     """Load the diff for an entry and return its prepared view."""
     patch = git.diff(root, entry)
     return build_diff_view(entry, patch)
+
+
+def is_current_request(token: int, current: int) -> bool:
+    """Return whether a request token still matches the current one."""
+    return token == current
 
 
 def toggle_file(root: Path, entry: FileEntry) -> None:
@@ -144,6 +149,7 @@ class GitPaneApp(App[None]):
         super().__init__()
         self.root = root
         self.selection: tuple[str, Side] | None = None
+        self.request_id = 0
 
     def compose(self) -> ComposeResult:
         yield Horizontal(
@@ -174,6 +180,7 @@ class GitPaneApp(App[None]):
         await self.toggle_entry(item.entry)
 
     async def refresh_status(self) -> None:
+        self.request_id += 1
         state = git.status(self.root)
         staged_list = self.query_one("#staged-list", ListView)
         unstaged_list = self.query_one("#unstaged-list", ListView)
@@ -185,7 +192,9 @@ class GitPaneApp(App[None]):
 
         self.selection = None
         self.query_one("#diff", Static).update("")
-        self.query_one("#diff-scroll", VerticalScroll).scroll_to(0, 0, animate=False)
+        diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
+        diff_scroll.scroll_to(0, 0, animate=False)
+        diff_scroll.loading = False
 
         if state.staged:
             staged_list.index = 0
@@ -195,16 +204,30 @@ class GitPaneApp(App[None]):
             unstaged_list.focus()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Load the diff for a selected file entry."""
+        """Start loading the diff for a selected file entry."""
         if not isinstance(event.item, FileItem):
             return
 
         entry = event.item.entry
         self.selection = (entry.path, entry.side)
-        view = load_diff_view(self.root, entry)
-        self.query_one("#diff", Static).update(view.text)
+        self.request_id += 1
+        self.query_one("#diff-scroll", VerticalScroll).loading = True
+        self.load_diff(entry, self.request_id)
 
+    @work(thread=True, exclusive=True, group="diff")
+    def load_diff(self, entry: FileEntry, token: int) -> None:
+        """Load a diff on a thread worker and hand the result to the app."""
+        view = load_diff_view(self.root, entry)
+        self.call_from_thread(self.apply_diff_view, view, token)
+
+    def apply_diff_view(self, view: DiffView, token: int) -> None:
+        """Apply a loaded diff view if it is still the current request."""
+        if not is_current_request(token, self.request_id):
+            return
+
+        self.query_one("#diff", Static).update(view.text)
         diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
+        diff_scroll.loading = False
         diff_scroll.scroll_to(0, 0, animate=False)
         if view.first_change is not None:
             self.call_after_refresh(
