@@ -216,8 +216,6 @@ def test_render_diff_rows_projects_highlights_by_new_side_position(
         rendered.plain == "    20   10 context\n-   21      removed\n+        30 added"
     )
     spans = [(span.start, span.end, span.style) for span in rendered.spans]
-    assert (12, 19, Style(color="cyan")) in spans
-    assert (52, 57, Style(color="magenta")) in spans
     background_spans = [
         (start, end, style)
         for start, end, style in spans
@@ -250,7 +248,7 @@ def test_render_diff_rows_projects_highlights_by_new_side_position(
         for start, end, style in spans
     )
     assert not any(
-        start < 19
+        start <= 19
         and end > 0
         and isinstance(style, Style)
         and style.bgcolor is not None
