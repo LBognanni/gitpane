@@ -1435,7 +1435,7 @@ editor, or smoke check.
 | --- | --- | --- |
 | 1 | Theme the app shell and list states | Complete |
 | 2 | Theme diff rows without replacing syntax foregrounds | Complete |
-| 3 | Final cleanup and milestone verification | Pending |
+| 3 | Final cleanup and milestone verification | Complete |
 
 ## Story 1: Theme the app shell and list states
 
