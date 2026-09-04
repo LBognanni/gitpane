@@ -1,4 +1,8 @@
-from gitpane.diff import Row, parse
+from io import StringIO
+
+import pytest
+
+from gitpane.diff import Row, first_change_index, main, parse
 
 
 def test_parse_maps_context_removals_and_additions() -> None:
@@ -86,3 +90,40 @@ def test_parse_preserves_final_changed_line_without_newline() -> None:
         Row(1, None, "old", "remove"),
         Row(None, 1, "new", "add"),
     ]
+
+
+def test_first_change_index_returns_zero_for_leading_change() -> None:
+    assert first_change_index([Row(None, 1, "new", "add")]) == 0
+
+
+def test_first_change_index_skips_context_before_change() -> None:
+    rows = [
+        Row(1, 1, "unchanged", "context"),
+        Row(2, 2, "also unchanged", "context"),
+        Row(3, None, "old", "remove"),
+    ]
+
+    assert first_change_index(rows) == 2
+
+
+def test_first_change_index_returns_none_for_context_only_and_empty() -> None:
+    assert first_change_index([Row(1, 1, "unchanged", "context")]) is None
+    assert first_change_index([]) is None
+
+
+def test_main_prints_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    patch = """\
+--- a/example.txt
++++ b/example.txt
+@@ -1,2 +1,2 @@
+ same
+-old
++new
+"""
+    monkeypatch.setattr("sys.stdin", StringIO(patch))
+
+    main()
+
+    assert capsys.readouterr().out == "Rows: 3\nFirst change: 1\n"

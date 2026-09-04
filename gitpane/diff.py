@@ -1,3 +1,5 @@
+import sys
+from collections.abc import Sequence
 from typing import Literal, NamedTuple
 
 from unidiff.patch import PatchSet
@@ -40,3 +42,20 @@ def parse(text: str) -> list[Row]:
                     rows.append(Row(None, line.target_line_no, line_text, "add"))
 
     return rows
+
+
+def first_change_index(rows: Sequence[Row]) -> int | None:
+    for index, row in enumerate(rows):
+        if row.kind in ("add", "remove"):
+            return index
+    return None
+
+
+def main() -> None:
+    rows = parse(sys.stdin.read())
+    print(f"Rows: {len(rows)}")
+    print(f"First change: {first_change_index(rows)}")
+
+
+if __name__ == "__main__":
+    main()
