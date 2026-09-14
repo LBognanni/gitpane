@@ -105,8 +105,13 @@ HorizontalSplitter.dragging {
 }
 
 ListView > ListItem {
+    height: 1;
     background: $surface;
     color: $text;
+}
+
+ListView > ListItem > Static {
+    text-wrap: nowrap;
 }
 
 ListView > ListItem:hover {

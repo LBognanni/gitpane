@@ -163,6 +163,15 @@ def test_list_states_have_the_locked_hierarchy() -> None:
     )
 
 
+def test_status_list_entries_are_single_line() -> None:
+    stylesheet = _stylesheet()
+
+    assert _has_declaration(_rule(stylesheet, "ListView > ListItem"), "height: 1")
+    assert _has_declaration(
+        _rule(stylesheet, "ListView > ListItem > Static"), "text-wrap: nowrap"
+    )
+
+
 def test_layout_and_diff_scroll_contracts_are_retained() -> None:
     stylesheet = _stylesheet()
     sidebar = _rule(stylesheet, "#sidebar")

@@ -14,6 +14,8 @@ def resize_pair(first: int, second: int, delta: int, minimum: int) -> tuple[int,
 class _Splitter(Static):
     """Mouse-drag divider which resizes its adjacent siblings."""
 
+    ALLOW_SELECT = False
+
     def __init__(self, *, minimum: int) -> None:
         super().__init__()
         self.minimum = minimum

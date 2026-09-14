@@ -57,6 +57,8 @@ def test_vertical_splitter_resizes_adjacent_panes_with_mouse() -> None:
             await pilot.mouse_up(splitter, offset=(5, 0))
             await pilot.pause()
 
+            assert splitter.allow_select is False
+            assert app.screen.selections == {}
             assert first.outer_size.width > initial[0]
             assert second.outer_size.width < initial[1]
             assert first.outer_size.width + second.outer_size.width == sum(initial)
