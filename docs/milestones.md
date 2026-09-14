@@ -388,6 +388,378 @@ The current diff appearance and navigation behavior must remain intact.
   scrolling without a regression for small diffs.
 - Ruff, formatting, mypy, and the full test suite pass.
 
+## Scope and locked decisions
+
+- Optimize only the **unwrapped diff** path. File previews remain
+  `CodeScroll(Static(...))`, and wrapped diffs retain the current whole-document
+  `Static` fallback. Milestone 3 owns preview virtualization; Milestone 4 owns a
+  wrapped-row index if measurements justify one.
+- Add one focused read-only `ScrollView` subclass. It stores an immutable
+  sequence of independently styled Rich `Text` lines and a maximum cell width;
+  it is not an editor, does not create one widget per line, and has no cursor,
+  selection, or progressive-highlighting machinery.
+- Keep complete-document syntax highlighting in the existing worker. This
+  milestone changes prepared diff output from one joined `Text` to styled
+  logical lines, but does not change lexing policy or parse Git output
+  differently.
+- Preserve the current row format exactly: marker, four-column old number,
+  four-column new number, one separating space, source text, syntax foreground
+  styles only on the new side, and `#142b1d` / `#351b20` backgrounds across the
+  complete rendered add/remove row content. Empty rows, tabs, wide Unicode, and
+  4,096-column benchmark rows must remain valid.
+- The virtual viewer owns horizontal and vertical scrolling, the existing jump
+  scrollbar behavior, and non-animated page actions. Do not put the virtual
+  viewer inside another scroll container.
+- Keep the existing wrapped-mode semantics: `w` is independent per tab,
+  entering wrapped mode hides horizontal overflow and resets horizontal offset
+  to zero, both wrap transitions restore relative vertical progress, and a diff
+  loaded while wrapping is enabled is shown wrapped. Build the joined wrapped
+  `Text` lazily; an unwrapped 50,000-row diff must never construct it.
+- Applying a current diff replaces the document atomically, resets both offsets,
+  then scrolls to `first_change` after dimensions are current. Index zero is a
+  valid first change. Empty/context-only documents remain at the origin.
+  Existing request tokens and exclusive workers remain the authority for stale
+  request rejection; a rejected result must not mutate content, loading state,
+  offsets, or viewer generation.
+- Do **not** add a custom visible-strip cache initially. Textual's normal render
+  cache plus viewport-only `render_line()` is the KISS implementation. Every
+  document replacement must force a repaint and dimension update; horizontal
+  scroll and resize must crop from current lines. If profiling still identifies
+  line rendering as material, stop and update this plan before adding a small
+  generation/row/x/width-keyed cache with bounded size and explicit invalidation
+  on replacement, resize, style/theme change, and wrapping change.
+- Keep the four-entry `build_diff_view` LRU policy unchanged. Milestone 3 owns
+  cache-admission limits; this milestone may reduce each entry by removing the
+  joined document renderable but must not introduce a global memory manager.
+- Preserve workload IDs, operation counts, terminal size, and report schema from
+  Milestone 1. Performance remains report-only in pytest. For milestone review,
+  “material improvement” means the same-environment 50k `diff-mixed`
+  first-render result is at least 2x faster than the M1 `Static` result, and “no
+  small-diff regression” means the 1k `diff-mixed` first-render result is no more
+  than 20% slower. Treat these as a human review gate, not a CI timing assertion;
+  if environment fields differ, record the comparison as directional and rerun
+  on the M1 environment before claiming acceptance.
+- Do not boot the editor or add manual/browser smoke tests. Functional behavior
+  belongs in normal headless tests; resource-intensive measurements remain
+  marked `performance`.
+
+## Acceptance-to-story mapping
+
+| Acceptance criterion | Owning stories | Proof |
+| --- | --- | --- |
+| Viewport updates do not render every unwrapped row | M2-S2, M2-S3 | Instrumented `render_line()` headless tests request only visible/cropped rows; app composition uses the viewer directly. |
+| A prepared 50k diff has no document-sized `Static` renderable in unwrapped mode | M2-S1, M2-S3, M2-S4 | Prepared output is per-line, the default app path never joins it, and the 50k harness exercises the production virtual viewer. |
+| Text, gutters, backgrounds, syntax styles, and first-change position match | M2-S1, M2-S3 | Stable row-style unit tests plus app-level initial-position tests, including first change zero. |
+| Line/page/jump/horizontal behavior is unanimated and bounded | M2-S2, M2-S3 | Viewer action, scrollbar, long-line cropping, and app integration tests. |
+| Wrapping retains current behavior without expanding M2 scope | M2-S3 | Hybrid virtual-unwrapped / lazy-`Static`-wrapped tests cover both transitions, progress, horizontal reset, and load-while-wrapped. |
+| Replacement cannot expose stale rows or strips | M2-S2, M2-S3 | Same-viewport replacement test plus stale-token app test proving no state/generation mutation. |
+| Large-diff improvement and no small-diff regression | M2-S4, M2-S5 | Unchanged M1 workload contract, raw post-M2 report, and reviewed ratio table against `docs/performance-baseline.md`. |
+| All quality gates pass and results are documented | M2-S5 | Full format, lint, type, normal, and performance commands plus final comparison document. |
+
+## Story plan
+
+### M2-S1 — Prepare independently renderable diff lines
+
+**Outcome:** cached diff preparation returns immutable styled logical lines and
+first-change metadata without constructing one joined document `Text`; the
+existing `Static` display remains functional until integration is changed.
+
+**Target paths**
+
+- Modify `gitpane/app.py` (`DiffView`, `build_diff_view`, and diff-row rendering
+  helpers only).
+- Modify `tests/test_app.py` for the new prepared representation and row-level
+  formatting/style contracts.
+- Modify `tests/performance/test_preparation.py` to measure the same
+  `view-construction` phase against per-line construction while retaining the M1
+  workload IDs, phase name, samples, and memory scopes.
+
+**Implementation guidance**
+
+1. Make `DiffView` contain a tuple of styled `Text` lines and `first_change`.
+   Keep a tiny explicit helper that joins lines with exactly one newline only
+   for the temporary/required `Static` fallback; do not store that joined value
+   in `DiffView` and do not memoize it.
+2. Refactor the current single-pass `render_diff_rows()` behavior into one
+   linear pass producing one `Text` per `Row`. Highlight the reconstructed new
+   side once, advance its index only for rows with `new_no`, and copy/append Rich
+   text without converting through markup.
+3. Apply the add/remove background after gutter and source text are complete so
+   it covers every character in that logical row without replacing syntax
+   foreground colors. Preserve the exact plain strings and span semantics
+   already asserted in `tests/test_app.py`.
+4. Keep `build_diff_view(entry, patch)` and its four-entry cache key/behavior.
+   Extend tests to prove repeated keys reuse the tuple, changed patch/entry
+   rebuilds it, and a prepared multi-row view has no joined document field.
+5. During this story only, let `apply_diff_view()` join the tuple before updating
+   the existing `Static`; M2-S3 removes that join from the unwrapped path. Avoid
+   unrelated app or CSS changes.
+
+**Dependencies:** Milestone 1 accepted.
+
+**Verification**
+
+```bash
+uv run pytest tests/test_app.py tests/test_diff.py
+uv run pytest -m performance tests/performance/test_preparation.py
+uv run ruff check gitpane/app.py tests/test_app.py tests/performance/test_preparation.py
+uv run ruff format --check gitpane/app.py tests/test_app.py tests/performance/test_preparation.py
+uv run mypy gitpane/app.py tests/test_app.py tests/performance/test_preparation.py
+```
+
+Expected: row text/styles and cache behavior are unchanged, preparation records
+remain structurally comparable, and `DiffView` retains no joined full-document
+renderable.
+
+### M2-S2 — Add the minimal virtual code viewer
+
+**Outcome:** a standalone `ScrollView` paints and horizontally crops only the
+requested logical line, reports correct virtual dimensions, and owns current
+page/jump behavior without a custom strip cache.
+
+**Target paths**
+
+- Add `gitpane/widgets/code_view.py` containing the virtual viewer and the shared
+  jump-scrollbar primitives currently in `gitpane/app.py`.
+- Modify `gitpane/widgets/__init__.py` to export the new production widgets and
+  helper.
+- Modify `gitpane/app.py` only to import/re-export the moved `CodeScroll`,
+  `JumpScrollBar`, and `scrollbar_click_target`, preserving existing imports and
+  preview behavior.
+- Add `tests/test_code_view.py` for viewer-specific functional tests.
+- Modify `tests/test_app.py` only where existing shared-scroll tests need to use
+  the moved implementation.
+
+**Implementation guidance**
+
+1. Implement a small `CodeView(ScrollView)` with a tuple of `Text` lines, a
+   monotonically increasing read-only document generation for testability, and
+   one `set_document(lines)` method. That method replaces all content, bumps the
+   generation even for equal-looking new input, computes maximum Rich cell width
+   once, sets `virtual_size = Size(max_width, len(lines))`, resets offsets
+   unanimated, and refreshes the widget.
+2. Override `render_line(y)` using Textual/Rich strip APIs: select only the
+   requested virtual row, render it without wrapping or markup interpretation,
+   crop/pad it for the current horizontal offset and viewport width, and return
+   a blank strip outside document bounds. Do not join neighboring rows and do
+   not call a renderer over the complete tuple.
+3. Override `vertical_scrollbar` with `JumpScrollBar` and keep page up/down
+   actions as direct `animate=False` calls, matching `CodeScroll`. Preserve
+   `scrollbar_click_target()` centering/clamping for zero and short dimensions.
+4. Test empty/single/many-row dimensions; styled gutter/source/background spans;
+   tabs and wide Unicode cell width; long-line horizontal crop and reset;
+   bounded line/page/jump scrolling; resize; and replacement at the same scroll
+   position. Instrument requested row numbers to prove a repaint of a large
+   document does not touch all rows.
+5. Add no custom `lru_cache`, strip dictionary, wrapping support, app-specific
+   request logic, or preview logic.
+
+**Dependencies:** M2-S1 prepared-line contract.
+
+**Verification**
+
+```bash
+uv run pytest tests/test_code_view.py tests/test_app.py
+uv run pytest -m "not performance"
+uv run ruff check gitpane/widgets/code_view.py gitpane/widgets/__init__.py gitpane/app.py tests/test_code_view.py tests/test_app.py
+uv run ruff format --check gitpane/widgets/code_view.py gitpane/widgets/__init__.py gitpane/app.py tests/test_code_view.py tests/test_app.py
+uv run mypy gitpane/widgets/code_view.py gitpane/widgets/__init__.py gitpane/app.py tests/test_code_view.py tests/test_app.py
+```
+
+Expected: functional tests prove virtual dimensions and visible-row rendering,
+including fresh content after replacement; normal tests still exercise the
+unchanged `Static` app path and preview `CodeScroll`.
+
+### M2-S3 — Integrate virtual unwrapped diffs and wrapped fallback
+
+**Outcome:** the Changes tab uses `CodeView` directly in normal mode, lazily
+switches to the old whole-document path only for wrapping, and preserves loading,
+navigation, initial position, file replacement, and stale-request behavior.
+
+**Target paths**
+
+- Modify `gitpane/app.py` composition, wrap switching, refresh/reset helpers,
+  request loading state, and current-result application for diffs only.
+- Modify `gitpane/app.tcss` for the virtual viewer and hidden/shown wrapped
+  fallback while retaining the locked palette and preview rules.
+- Modify `tests/test_app.py` with headless integration coverage.
+- Modify `tests/test_theme.py` for the new diff selectors and unchanged palette
+  contracts.
+
+**Implementation guidance**
+
+1. Compose one unwrapped `CodeView` directly in `#diff-pane` and one initially
+   hidden `CodeScroll(Static(...))` fallback for wrapped mode. Use unambiguous
+   IDs (for example `#diff-view`, `#diff-scroll`, and `#diff`) and centralize
+   selection of the active diff widget so loading/reset code cannot update the
+   wrong one. Leave the preview composition untouched.
+2. Store only the currently accepted `DiffView` on the app. In unwrapped mode,
+   call `CodeView.set_document(view.lines)`, clear loading, and after dimensions
+   settle scroll directly to `view.first_change` with `animate=False`. In wrapped
+   mode, join the same lines only when applying/showing the fallback, apply the
+   current wrapped CSS, and perform the same first-change positioning.
+3. On `w`, capture progress from the active path, switch visibility, reset x to
+   zero when entering wrapping, and restore relative y after the destination has
+   laid out. On return to unwrapped mode, re-use prepared lines (not a split of
+   the joined text), remove the joined value from the `Static`, and preserve the
+   current behavior of leaving x at zero.
+4. Status refresh/clear must empty both paths, cancel their loading indicators,
+   reset offsets, and discard the accepted view. A new request may leave the
+   prior content visible as today, but only the matching token may replace it.
+   Add a regression test where an older result arrives after a newer one and
+   assert content, generation, offsets, and loading state all remain those of
+   the newer result.
+5. Add headless tests for first changes at zero and after leading context,
+   no-change and empty documents, repeated file replacement while scrolled,
+   line/page/jump and long-line horizontal movement, both wrap
+   transitions/progress restoration, and loading a new diff while already
+   wrapped. Assert the default diff DOM has no document-sized `Static` content.
+
+**Dependencies:** M2-S1 and M2-S2 accepted.
+
+**Verification**
+
+```bash
+uv run pytest tests/test_app.py tests/test_code_view.py tests/test_theme.py
+uv run pytest -m "not performance"
+uv run ruff check gitpane/app.py tests/test_app.py tests/test_code_view.py tests/test_theme.py
+uv run ruff format --check gitpane/app.py tests/test_app.py tests/test_code_view.py tests/test_theme.py
+uv run mypy gitpane/app.py tests/test_app.py tests/test_code_view.py tests/test_theme.py
+```
+
+Expected: unwrapped app tests use `CodeView`, wrapped tests alone populate the
+fallback `Static`, first-change scrolling is exact and unanimated, and stale
+applications are state-preserving no-ops.
+
+### M2-S4 — Benchmark the production virtual diff path
+
+**Outcome:** the M1 harness measures the new diff viewer with the exact existing
+matrix and demonstrates viewport-scaled work and reviewable 1k/50k comparison
+data while previews continue to measure their unchanged `Static` path.
+
+**Target paths**
+
+- Modify `tests/performance/viewer_harness.py` to support the production virtual
+  diff viewer and existing static preview viewer without duplicating scrolling
+  behavior.
+- Modify `tests/performance/test_viewer.py` to supply prepared diff lines to the
+  virtual harness and retain every M1 workload ID, operation, count, assertion,
+  and report key.
+- Modify `tests/performance/test_preparation.py` only if final operation labels
+  need alignment with the M1 comparison table.
+- Modify `tests/test_performance_reporting.py` only if a required structural
+  report assertion changes; do not bump the schema for implementation details.
+
+**Implementation guidance**
+
+1. Keep one small harness with an explicit viewer mode. Diff cases mount
+   `CodeView`; preview cases continue to mount `CodeScroll(Static)`. Reuse each
+   widget's production page action and scrollbar rather than simulating them in
+   a benchmark-only class.
+2. Start first-render timing immediately before `set_document()` for diffs (or
+   `Static.update()` for previews) and stop after the same settled headless frame.
+   Preparation remains outside this timer.
+3. Preserve ten line scrolls, ten page scrolls, five 10%/50%/90% jumps, five
+   horizontal samples where applicable, two resizes, wrap on/off, fixed 120x40,
+   and all structural bounds assertions. For diff wrap measurements, exercise
+   the production lazy fallback transition rather than pretending `CodeView`
+   supports wrapping.
+4. Add a stable assertion/counter showing the 50k unwrapped first frame and each
+   scroll render only a viewport-sized set of rows. Never assert elapsed time in
+   pytest.
+5. Run the full performance command on an idle machine matching the M1
+   environment. Retain `.artifacts/performance-baseline.json` locally for M2-S5;
+   do not edit documentation or commit raw JSON in this story. If the review
+   ratios miss the locked gate, profile before changing code; do not add a strip
+   cache without a plan update.
+
+**Dependencies:** M2-S3 accepted; M1 workload/report contract.
+
+**Verification**
+
+```bash
+uv run pytest tests/test_performance_reporting.py
+uv run pytest -m performance tests/performance/test_preparation.py tests/performance/test_viewer.py
+uv run pytest -m performance
+test -s .artifacts/performance-baseline.json
+uv run ruff check tests/performance tests/test_performance_reporting.py
+uv run ruff format --check tests/performance tests/test_performance_reporting.py
+uv run mypy tests/performance tests/test_performance_reporting.py
+```
+
+Expected: the raw report still contains separate diff/preview preparation,
+first-render, line/page/jump/horizontal, resize, wrap, and memory records; diff
+records use the virtual path and preview records remain directly comparable to
+M1.
+
+### M2-S5 — Final cleanup and reviewed comparison
+
+**Outcome:** obsolete unwrapped-`Static` glue is removed, all gates pass, and a
+revision/environment-specific document records the M2 result against M1 without
+rewriting the original baseline.
+
+**Target paths**
+
+- Modify `gitpane/app.py` and `gitpane/app.tcss` only if M2-S4 exposes dead
+  transitional names/branches; do not refactor unrelated app behavior.
+- Modify `tests/test_app.py`, `tests/test_code_view.py`, `tests/test_theme.py`,
+  `tests/performance/viewer_harness.py`, and `tests/performance/test_viewer.py`
+  only where required by that cleanup; otherwise leave them unchanged.
+- Add `docs/performance-m2.md` with source revision and dirty state, environment,
+  unchanged workload contract, selected raw M2 results, exact M1 values and
+  ratios, viewport-rendering evidence, memory observations, limitations, and the
+  locked acceptance-gate conclusion.
+- Modify `docs/milestones.md` only to update the Milestone 2 status table after
+  each accepted story; these remain separate small documentation updates under
+  the workflow.
+
+**Implementation guidance**
+
+1. Remove compatibility code that is no longer used by either the wrapped diff
+   fallback or static preview. Keep `CodeScroll` for those two paths and keep
+   public imports used by tests unless all callers are updated in scope.
+2. Generate the final raw report from the exact revision being documented on an
+   idle M1-compatible machine. Copy integer min/median/max values; report ratios
+   for 1k and 50k `diff-mixed` first render and the individual diff scroll
+   operations. Do not hide preparation/highlighting, wrapped fallback, preview,
+   or memory results that did not improve.
+3. State explicitly whether the 2x large-diff and 20% small-diff review gates
+   passed. Keep timing gates out of tests, retain raw JSON only under ignored
+   `.artifacts/`, and leave `docs/performance-baseline.md` unchanged as the M1
+   source of record.
+4. This is the only phase-summary/documentation story. Do not edit
+   `docs/perf.md`, redesign Milestones 3/4, change full-context Git behavior, add
+   cache admission, or include unrelated worktree changes.
+
+**Dependencies:** M2-S1 through M2-S4 accepted and the final raw artifact
+generated from the documented revision.
+
+**Verification**
+
+```bash
+uv run ruff check gitpane tests
+uv run ruff format --check gitpane tests
+uv run mypy gitpane tests
+uv run pytest -m "not performance"
+uv run pytest -m performance
+test -s .artifacts/performance-baseline.json
+```
+
+Expected checked-in documentation: `docs/performance-m2.md`. Confirm its source
+revision, dirty-state note, environment, workload IDs, result values, ratios, and
+gate conclusion match the final raw report and the M1 values in
+`docs/performance-baseline.md` before accepting the milestone.
+
+## Milestone 2 status
+
+| Story | Status | Depends on | Primary deliverable |
+| --- | --- | --- | --- |
+| M2-S1 — Prepared diff lines | Planned | M1 | Immutable independently styled rows |
+| M2-S2 — Virtual code viewer | Planned | M2-S1 | Viewport-only `ScrollView` with current navigation |
+| M2-S3 — Diff integration | Planned | M2-S1, M2-S2 | Virtual unwrapped path and lazy wrapped fallback |
+| M2-S4 — Benchmark migration | Planned | M2-S3 | M1-compatible post-virtualization raw report |
+| M2-S5 — Cleanup and comparison | Planned | M2-S1–M2-S4 | `docs/performance-m2.md` and accepted status |
+
 ## Verification
 
 ```bash
