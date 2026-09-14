@@ -32,12 +32,18 @@ def repo_root(path: Path | None = None) -> Path:
 def _parse_status(output: str, root: Path) -> RepoState:
     staged: list[FileEntry] = []
     unstaged: list[FileEntry] = []
+    branch = ""
+    oid = ""
 
     records = iter(output.split("\0"))
     for record in records:
         if not record:
             continue
-        if record.startswith("1 "):
+        if record.startswith("# branch.head "):
+            branch = record.removeprefix("# branch.head ")
+        elif record.startswith("# branch.oid "):
+            oid = record.removeprefix("# branch.oid ")
+        elif record.startswith("1 "):
             fields = record.split(" ", maxsplit=8)
             if len(fields) != 9:
                 continue
@@ -57,13 +63,23 @@ def _parse_status(output: str, root: Path) -> RepoState:
         elif record.startswith("2 "):
             next(records, None)
 
-    return RepoState(root, staged, unstaged)
+    if branch == "(detached)" and oid:
+        branch = f"detached at {oid[:7]}"
+    return RepoState(root, staged, unstaged, branch)
 
 
 def status(root: Path) -> RepoState:
     """Return the parsed Git status for *root*."""
     return _parse_status(
-        _run(root, "status", "--porcelain=v2", "-z", "--untracked-files=all"), root
+        _run(
+            root,
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ),
+        root,
     )
 
 

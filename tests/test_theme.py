@@ -104,9 +104,9 @@ def test_renderer_diff_backgrounds_match_tcss(kind: str, variable: str) -> None:
     [
         ("Screen", ("background: $canvas", "color: $text")),
         ("#body", ("background: $canvas", "color: $text")),
-        ("#sidebar", ("background: $surface", "border-right: solid $border")),
+        ("#sidebar", ("background: $surface",)),
         (
-            "#sidebar > Static",
+            ".panel-title,\n.viewer-title,\n#branch-status",
             ("background: $raised-surface", "color: $muted-text", "text-style: bold"),
         ),
         (
@@ -171,10 +171,10 @@ def test_layout_and_diff_scroll_contracts_are_retained() -> None:
     diff = _rule(stylesheet, "#diff")
 
     assert _has_declaration(_rule(stylesheet, "#body"), "height: 1fr")
-    assert all(
-        _has_declaration(sidebar, declaration)
-        for declaration in ("width: 30", "min-width: 30", "max-width: 30")
-    )
+    assert _has_declaration(sidebar, "width: 30")
+    assert _has_declaration(sidebar, "min-width: 15")
+    assert not _has_declaration(sidebar, "max-width: 30")
+    assert _has_declaration(_rule(stylesheet, ".sidebar-section"), "height: 1fr")
     assert _has_declaration(lists, "height: 1fr")
     assert _has_declaration(diff_scroll, "overflow: scroll scroll")
     assert _has_declaration(diff, "width: auto")

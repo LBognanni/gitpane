@@ -226,7 +226,9 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
     entry = CommitFile("src/history.py", "M", commit.hash, commit.parent)
     requested: list[tuple[CommitFile, int]] = []
 
-    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr(
+        "gitpane.app.git.status", lambda root: RepoState(root, [], [], "main")
+    )
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [commit])
     monkeypatch.setattr("gitpane.app.git.commit_files", lambda _root, _commit: [entry])
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
@@ -242,6 +244,9 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             tree = app.query_one("#commit-tree", Tree)
             commit_node = tree.root.children[0]
             assert str(commit_node.label) == "Add history abc1234"
+            assert (
+                str(app.query_one("#branch-status", Static).content) == "Branch: main"
+            )
 
             tree.select_node(commit_node)
             await app.workers.wait_for_complete()
@@ -257,6 +262,33 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
 
             assert requested == [(entry, app.request_id)]
             assert app.selection == entry
+            assert str(app.query_one("#diff-title", Static).content) == entry.path
+
+    asyncio.run(exercise())
+
+
+def test_file_selection_shows_repository_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "nested" / "example.py"
+    path.parent.mkdir()
+    path.write_text("answer = 42\n")
+    monkeypatch.setattr(
+        "gitpane.app.git.status", lambda root: RepoState(root, [], [], "main")
+    )
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: ["nested/example.py"])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            tree = app.query_one("#files-tree", Tree)
+            tree.select_node(tree.root.children[0].children[0])
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            title = app.query_one("#preview-title", Static)
+            assert str(title.content) == "nested/example.py"
 
     asyncio.run(exercise())
 

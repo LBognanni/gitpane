@@ -58,6 +58,47 @@ def test_parse_status_skips_rename_continuation() -> None:
     assert state.unstaged == []
 
 
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("# branch.oid abcdef123456\0# branch.head feature/test\0", "feature/test"),
+        (
+            "# branch.oid abcdef123456\0# branch.head (detached)\0",
+            "detached at abcdef1",
+        ),
+        ("# branch.oid (initial)\0# branch.head main\0", "main"),
+    ],
+)
+def test_parse_status_reports_branch(output: str, expected: str) -> None:
+    assert _parse_status(output, Path("/repository")).branch == expected
+
+
+def test_status_requests_branch_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_run(root: Path, *args: str) -> str:
+        calls.append((root, args))
+        return "# branch.oid hash\0# branch.head main\0"
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    state = gitpane.git.status(Path("/repository"))
+
+    assert state.branch == "main"
+    assert calls == [
+        (
+            Path("/repository"),
+            (
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "-z",
+                "--untracked-files=all",
+            ),
+        )
+    ]
+
+
 def test_run_preserves_subprocess_settings_and_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -36,3 +36,4 @@ class RepoState:
     root: Path
     staged: list[FileEntry]
     unstaged: list[FileEntry]
+    branch: str = ""

@@ -40,16 +40,49 @@ Tab.--active {
 
 #sidebar {
     width: 30;
-    min-width: 30;
-    max-width: 30;
+    min-width: 15;
     background: $surface;
-    border-right: solid $border;
 }
 
-#sidebar > Static {
+.sidebar-section {
+    height: 1fr;
+}
+
+.panel-title,
+.viewer-title,
+#branch-status {
     background: $raised-surface;
     color: $muted-text;
     text-style: bold;
+}
+
+.viewer-title {
+    height: 1;
+    padding: 0 1;
+}
+
+#branch-status {
+    height: 1;
+    padding: 0 1;
+}
+
+VerticalSplitter {
+    width: 1;
+    height: 1fr;
+    color: $border;
+}
+
+HorizontalSplitter {
+    width: 1fr;
+    height: 1;
+    color: $border;
+}
+
+VerticalSplitter:hover,
+HorizontalSplitter:hover,
+VerticalSplitter.dragging,
+HorizontalSplitter.dragging {
+    color: $accent;
 }
 
 #staged-list,
@@ -96,6 +129,7 @@ ListView:focus > ListItem.--highlight {
 }
 
 #diff-scroll {
+    height: 1fr;
     overflow: scroll scroll;
     background: $diff-background;
     color: $text;
@@ -135,6 +169,11 @@ ListView:focus > ListItem.--highlight {
     scrollbar-color: $accent;
 }
 
+#diff-pane,
+#preview-pane {
+    width: 1fr;
+}
+
 #files-tree > .tree--cursor {
     background: $focused-selection;
     color: $text;
@@ -142,6 +181,7 @@ ListView:focus > ListItem.--highlight {
 }
 
 #preview-scroll {
+    height: 1fr;
     overflow: scroll scroll;
     background: $diff-background;
     color: $text;

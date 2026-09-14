@@ -25,6 +25,7 @@ from textual.widgets.tree import TreeNode
 from gitpane import diff, git
 from gitpane.diff import Row
 from gitpane.model import Commit, CommitFile, FileEntry, Side
+from gitpane.widgets import HorizontalSplitter, VerticalSplitter
 
 DiffEntry = FileEntry | CommitFile
 
@@ -281,23 +282,47 @@ class GitPaneApp(App[None]):
             with TabPane("Changes", id="changes-tab"):
                 yield Horizontal(
                     Vertical(
-                        Static("Staged"),
-                        ListView(id="staged-list"),
-                        Static("Unstaged"),
-                        ListView(id="unstaged-list"),
-                        Static("Commits"),
-                        commit_tree,
+                        Vertical(
+                            Static("Staged", classes="panel-title"),
+                            ListView(id="staged-list"),
+                            id="staged-section",
+                            classes="sidebar-section",
+                        ),
+                        HorizontalSplitter(),
+                        Vertical(
+                            Static("Unstaged", classes="panel-title"),
+                            ListView(id="unstaged-list"),
+                            id="unstaged-section",
+                            classes="sidebar-section",
+                        ),
+                        HorizontalSplitter(),
+                        Vertical(
+                            Static("Commits", classes="panel-title"),
+                            commit_tree,
+                            id="commits-section",
+                            classes="sidebar-section",
+                        ),
                         id="sidebar",
                     ),
-                    CodeScroll(Static(id="diff"), id="diff-scroll"),
+                    VerticalSplitter(),
+                    Vertical(
+                        Static(id="diff-title", classes="viewer-title"),
+                        CodeScroll(Static(id="diff"), id="diff-scroll"),
+                        id="diff-pane",
+                    ),
                     id="body",
                 )
             with TabPane("Files", id="files-tab"):
                 yield Horizontal(
                     Tree[Path](Text(str(self.cwd)), id="files-tree"),
-                    CodeScroll(Static(id="preview"), id="preview-scroll"),
+                    Vertical(
+                        Static(id="preview-title", classes="viewer-title"),
+                        CodeScroll(Static(id="preview"), id="preview-scroll"),
+                        id="preview-pane",
+                    ),
                     id="files-body",
                 )
+        yield Static(id="branch-status")
 
     async def on_mount(self) -> None:
         await self.refresh_status()
@@ -367,6 +392,8 @@ class GitPaneApp(App[None]):
         await unstaged_list.extend(FileItem(entry) for entry in state.unstaged)
 
         self.selection = None
+        self.query_one("#branch-status", Static).update(f"Branch: {state.branch}")
+        self.query_one("#diff-title", Static).update("")
         self.query_one("#diff", Static).update("")
         diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
         diff_scroll.scroll_to(0, 0, animate=False)
@@ -416,6 +443,7 @@ class GitPaneApp(App[None]):
             nodes[parent_parts].add_leaf(Text(parts[-1]), self.cwd / relative)
 
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
+        self.query_one("#preview-title", Static).update("")
         self.query_one("#preview", Static).update("")
         preview_scroll.loading = False
         preview_scroll.scroll_to(0, 0, animate=False)
@@ -429,6 +457,7 @@ class GitPaneApp(App[None]):
     def request_diff(self, entry: DiffEntry) -> None:
         """Start loading a working-tree or historical diff."""
         self.selection = entry
+        self.query_one("#diff-title", Static).update(entry.path)
         self.request_id += 1
         self.query_one("#diff-scroll", VerticalScroll).loading = True
         self.load_diff(entry, self.request_id)
@@ -470,6 +499,9 @@ class GitPaneApp(App[None]):
         if not isinstance(data, Path):
             return
         self.preview_request_id += 1
+        self.query_one("#preview-title", Static).update(
+            str(data.relative_to(self.root))
+        )
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
         preview_scroll.loading = True
         self.load_preview(data, self.preview_request_id)

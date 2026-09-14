@@ -32,9 +32,11 @@ uv run python -m gitpane.app
 
 The **Changes** tab lists staged files, unstaged files, and up to 100 recent
 commits from the current branch. Select a commit to expand its changed files,
-then select a file to show its historical diff. The **Files** tab shows tracked
-and non-ignored untracked files below the directory where GitPane was launched;
-select one for a syntax-highlighted preview. Long lines scroll horizontally.
+then select a file to show its historical diff. The selected file is shown
+above each viewer, and the current branch appears in the bottom status bar. The
+**Files** tab shows tracked and non-ignored untracked files below the directory
+where GitPane was launched; select one for a syntax-highlighted preview. Long
+lines scroll horizontally.
 
 ## Controls
 
@@ -45,6 +47,7 @@ select one for a syntax-highlighted preview. Long lines scroll horizontally.
 | Enter or click a commit | Expand its changed files |
 | Space | Stage the focused unstaged file, or unstage the focused staged file |
 | Click `[ ]` | Stage or unstage that file |
+| Drag a divider | Resize the Changes sidebar or its sections |
 | `r` | Refresh repository status and files |
 
 Use the Changes and Files tabs (or Textual's normal tab navigation) to switch
