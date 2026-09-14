@@ -755,7 +755,7 @@ gate conclusion match the final raw report and the M1 values in
 | Story | Status | Depends on | Primary deliverable |
 | --- | --- | --- | --- |
 | M2-S1 — Prepared diff lines | Accepted | M1 | Immutable independently styled rows |
-| M2-S2 — Virtual code viewer | Planned | M2-S1 | Viewport-only `ScrollView` with current navigation |
+| M2-S2 — Virtual code viewer | Accepted | M2-S1 | Viewport-only `ScrollView` with current navigation |
 | M2-S3 — Diff integration | Planned | M2-S1, M2-S2 | Virtual unwrapped path and lazy wrapped fallback |
 | M2-S4 — Benchmark migration | Planned | M2-S3 | M1-compatible post-virtualization raw report |
 | M2-S5 — Cleanup and comparison | Planned | M2-S1–M2-S4 | `docs/performance-m2.md` and accepted status |
