@@ -5,7 +5,7 @@ import pytest
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
-from textual.widgets import TabbedContent, Tree
+from textual.widgets import Static, TabbedContent, Tree
 
 from gitpane.app import (
     MAX_PREVIEW_BYTES,
@@ -15,6 +15,7 @@ from gitpane.app import (
     JumpScrollBar,
     PreviewView,
     build_diff_view,
+    format_commit_label,
     format_file_label,
     highlight_new_lines,
     is_current_request,
@@ -28,7 +29,7 @@ from gitpane.app import (
     toggle_file,
 )
 from gitpane.diff import Row
-from gitpane.model import FileEntry, RepoState, Side
+from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
 
 
 @pytest.mark.parametrize(
@@ -46,6 +47,26 @@ def test_format_file_label_preserves_plain_paths(
     entry: FileEntry, expected: str
 ) -> None:
     assert format_file_label(entry) == expected
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        (":bug: Fix crash", "\U0001f41b Fix crash abc1234"),
+        ("Plain subject", "Plain subject abc1234"),
+        (":not_a_gitmoji: Keep unknown", ":not_a_gitmoji: Keep unknown abc1234"),
+    ],
+)
+def test_format_commit_label_expands_gitmoji_and_places_hash_last(
+    subject: str, expected: str
+) -> None:
+    commit = Commit("full-hash", "abc1234", None, subject)
+    label = format_commit_label(commit)
+
+    assert label.plain == expected
+    assert [(span.start, span.end, span.style) for span in label.spans] == [
+        (len(expected) - 7, len(expected), "dim")
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -198,12 +219,52 @@ def test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views(
     ]
 
 
+def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = Commit("full-hash", "abc1234", "parent-hash", "Add history")
+    entry = CommitFile("src/history.py", "M", commit.hash, commit.parent)
+    requested: list[tuple[CommitFile, int]] = []
+
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [commit])
+    monkeypatch.setattr("gitpane.app.git.commit_files", lambda _root, _commit: [entry])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    monkeypatch.setattr(
+        GitPaneApp,
+        "load_diff",
+        lambda _self, selected, token: requested.append((selected, token)),
+    )
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            tree = app.query_one("#commit-tree", Tree)
+            commit_node = tree.root.children[0]
+            assert str(commit_node.label) == "Add history abc1234"
+
+            tree.select_node(commit_node)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert commit_node.is_expanded
+            assert len(commit_node.children) == 1
+            file_node = commit_node.children[0]
+            assert str(file_node.label) == "M src/history.py"
+
+            tree.select_node(file_node)
+            await pilot.pause()
+
+            assert requested == [(entry, app.request_id)]
+            assert app.selection == entry
+
+    asyncio.run(exercise())
+
+
 def test_wrap_toggle_applies_independently_to_each_viewer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
-    )
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
 
     async def exercise() -> None:
@@ -241,9 +302,7 @@ def test_wrap_toggle_applies_independently_to_each_viewer(
 def test_loaded_preview_uses_current_wrap_setting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
-    )
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
 
     async def exercise() -> None:
@@ -276,9 +335,7 @@ def test_scrollbar_click_target_centers_and_clamps(y: float, expected: float) ->
 def test_code_viewers_use_jump_scrollbar_and_unanimated_paging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
-    )
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
 
     async def exercise() -> None:
@@ -310,16 +367,16 @@ def test_code_viewers_use_jump_scrollbar_and_unanimated_paging(
 def test_file_preview_scrollbar_track_click_jumps_to_clicked_position(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
-    )
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
         async with app.run_test() as pilot:
             app.query_one("#main-tabs", TabbedContent).active = "files-tab"
-            app.query_one("#preview").update(Text("\n".join(map(str, range(1000)))))
+            app.query_one("#preview", Static).update(
+                Text("\n".join(map(str, range(1000))))
+            )
             await pilot.pause()
 
             scroll = app.query_one("#preview-scroll", CodeScroll)

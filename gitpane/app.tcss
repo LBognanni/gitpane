@@ -53,11 +53,22 @@ Tab.--active {
 }
 
 #staged-list,
-#unstaged-list {
+#unstaged-list,
+#commit-tree {
     height: 1fr;
     background: $surface;
     color: $text;
     border: solid $border;
+}
+
+#commit-tree {
+    scrollbar-color: $accent;
+}
+
+#commit-tree > .tree--cursor {
+    background: $focused-selection;
+    color: $text;
+    text-style: bold;
 }
 
 ListView > ListItem {

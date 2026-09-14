@@ -1,8 +1,8 @@
 # gitpane
 
-A terminal Git status, diff, and file browser built with Python and Textual. It
-shows staged and unstaged files, displays full-context unified diffs, previews
-repository files, and can stage or unstage whole files.
+A terminal Git status, history, diff, and file browser built with Python and
+Textual. It shows staged and unstaged files, displays full-context unified
+diffs, previews repository files, and can stage or unstage whole files.
 
 ## Requirements
 
@@ -30,9 +30,10 @@ uv sync --dev
 uv run python -m gitpane.app
 ```
 
-The **Changes** tab lists staged files first, then unstaged files. Select a file
-to show its diff in the right pane. The **Files** tab shows tracked and
-non-ignored untracked files below the directory where GitPane was launched;
+The **Changes** tab lists staged files, unstaged files, and up to 100 recent
+commits from the current branch. Select a commit to expand its changed files,
+then select a file to show its historical diff. The **Files** tab shows tracked
+and non-ignored untracked files below the directory where GitPane was launched;
 select one for a syntax-highlighted preview. Long lines scroll horizontally.
 
 ## Controls
@@ -41,6 +42,7 @@ select one for a syntax-highlighted preview. Long lines scroll horizontally.
 | --- | --- |
 | Up/Down | Move through the focused file list |
 | Enter or click a file | Load its diff |
+| Enter or click a commit | Expand its changed files |
 | Space | Stage the focused unstaged file, or unstage the focused staged file |
 | Click `[ ]` | Stage or unstage that file |
 | `r` | Refresh repository status and files |

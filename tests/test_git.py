@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 import gitpane.git
-from gitpane.git import _parse_status
-from gitpane.model import FileEntry, Side
+from gitpane.git import _parse_commit_files, _parse_commits, _parse_status
+from gitpane.model import Commit, CommitFile, FileEntry, Side
 
 
 def test_parse_status_maps_ordinary_changes() -> None:
@@ -175,11 +175,39 @@ def test_run_rejects_return_code_two_when_one_is_allowed(
             ),
             {"allowed_returncodes": (0, 1)},
         ),
+        (
+            CommitFile("historical file.txt", "M", "commit", "parent"),
+            (
+                "diff",
+                "-U9999",
+                "--no-color",
+                "--no-ext-diff",
+                "parent",
+                "commit",
+                "--",
+                "historical file.txt",
+            ),
+            {},
+        ),
+        (
+            CommitFile("initial file.txt", "A", "root", None),
+            (
+                "show",
+                "--format=",
+                "-U9999",
+                "--no-color",
+                "--no-ext-diff",
+                "root",
+                "--",
+                "initial file.txt",
+            ),
+            {},
+        ),
     ],
 )
 def test_diff_builds_command_and_forwards_output(
     monkeypatch: pytest.MonkeyPatch,
-    entry: FileEntry,
+    entry: FileEntry | CommitFile,
     expected_args: tuple[str, ...],
     expected_kwargs: dict[str, tuple[int, int]],
 ) -> None:
@@ -226,6 +254,103 @@ def test_files_requests_scoped_tracked_and_non_ignored_paths(
             ),
         )
     ]
+
+
+def test_parse_commits_keeps_first_parent_and_subject() -> None:
+    output = (
+        "hash-one\0short-one\0parent-one parent-two\0Merge a branch\0"
+        "hash-two\0short-two\0\0Initial commit\0"
+    )
+
+    assert _parse_commits(output) == [
+        Commit("hash-one", "short-one", "parent-one", "Merge a branch"),
+        Commit("hash-two", "short-two", None, "Initial commit"),
+    ]
+
+
+def test_commits_requests_at_most_100_from_current_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, tuple[str, ...], dict[str, tuple[int, ...]]]] = []
+
+    def fake_run(root: Path, *args: str, **kwargs: tuple[int, ...]) -> str:
+        calls.append((root, args, kwargs))
+        return "hash\0short\0\0Subject\0"
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    assert gitpane.git.commits(Path("/repository")) == [
+        Commit("hash", "short", None, "Subject")
+    ]
+    assert calls == [
+        (
+            Path("/repository"),
+            (
+                "log",
+                "--max-count=100",
+                "-z",
+                "--format=%H%x00%h%x00%P%x00%s",
+            ),
+            {"allowed_returncodes": (0, 128)},
+        )
+    ]
+
+
+def test_parse_commit_files_preserves_status_and_path() -> None:
+    commit = Commit("hash", "short", "parent", "Subject")
+
+    assert _parse_commit_files("M\0path with spaces.py\0D\0-old.txt\0", commit) == [
+        CommitFile("path with spaces.py", "M", "hash", "parent"),
+        CommitFile("-old.txt", "D", "hash", "parent"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("commit", "expected_args"),
+    [
+        (
+            Commit("root-hash", "root", None, "Initial"),
+            (
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-status",
+                "--no-renames",
+                "-r",
+                "-z",
+                "root-hash",
+            ),
+        ),
+        (
+            Commit("hash", "short", "parent", "Subject"),
+            (
+                "diff",
+                "--name-status",
+                "--no-renames",
+                "-z",
+                "parent",
+                "hash",
+            ),
+        ),
+    ],
+)
+def test_commit_files_compares_with_first_parent_or_empty_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    commit: Commit,
+    expected_args: tuple[str, ...],
+) -> None:
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_run(root: Path, *args: str) -> str:
+        calls.append((root, args))
+        return "A\0added.txt\0"
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    assert gitpane.git.commit_files(Path("/repository"), commit) == [
+        CommitFile("added.txt", "A", commit.hash, commit.parent)
+    ]
+    assert calls == [(Path("/repository"), expected_args)]
 
 
 @pytest.mark.parametrize(

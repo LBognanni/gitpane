@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
+import emoji
+
 os.environ.setdefault("TEXTUAL_SMOOTH_SCROLL", "0")
 
 from rich.style import Style
@@ -22,12 +24,22 @@ from textual.widgets.tree import TreeNode
 
 from gitpane import diff, git
 from gitpane.diff import Row
-from gitpane.model import FileEntry, Side
+from gitpane.model import Commit, CommitFile, FileEntry, Side
+
+DiffEntry = FileEntry | CommitFile
 
 
 def format_file_label(entry: FileEntry) -> str:
     """Return the plain-text label for a status entry."""
     return f"[ ] {entry.status} {entry.path}"
+
+
+def format_commit_label(commit: Commit) -> Text:
+    """Return a commit subject with gitmoji expanded and its hash last."""
+    subject = emoji.emojize(commit.subject, language="alias")
+    label = Text(f"{subject} ")
+    label.append(commit.short_hash, style="dim")
+    return label
 
 
 @dataclass(frozen=True)
@@ -49,7 +61,7 @@ MAX_PREVIEW_BYTES = 1024 * 1024
 
 
 @functools.lru_cache(maxsize=4)
-def build_diff_view(entry: FileEntry, patch: str) -> DiffView:
+def build_diff_view(entry: DiffEntry, patch: str) -> DiffView:
     """Build the prepared diff view for an entry's patch text."""
     rows = diff.parse(patch)
     text = render_diff_rows(entry, rows)
@@ -57,7 +69,7 @@ def build_diff_view(entry: FileEntry, patch: str) -> DiffView:
     return DiffView(text, first_change)
 
 
-def load_diff_view(root: Path, entry: FileEntry) -> DiffView:
+def load_diff_view(root: Path, entry: DiffEntry) -> DiffView:
     """Load the diff for an entry and return its prepared view."""
     patch = git.diff(root, entry)
     return build_diff_view(entry, patch)
@@ -109,12 +121,12 @@ def reconstruct_new_source(rows: Sequence[Row]) -> str:
     return "\n".join(row.text for row in rows if row.kind != "remove")
 
 
-def lexer_for_entry(entry: FileEntry, source: str) -> str:
+def lexer_for_entry(entry: DiffEntry, source: str) -> str:
     """Select Rich's lexer for an entry and its reconstructed source."""
     return Syntax.guess_lexer(entry.path, source)
 
 
-def highlight_new_lines(entry: FileEntry, rows: Sequence[Row]) -> list[Text]:
+def highlight_new_lines(entry: DiffEntry, rows: Sequence[Row]) -> list[Text]:
     """Highlight the reconstructed new side as individual Rich text lines."""
     new_rows = [row for row in rows if row.kind != "remove"]
     if not new_rows:
@@ -140,7 +152,7 @@ def scrollbar_click_target(
     return max(0, min(target, virtual_size - window_size))
 
 
-def render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text:
+def render_diff_rows(entry: DiffEntry, rows: list[Row]) -> Text:
     """Render parsed diff rows as one plain Rich text value."""
     text = Text()
     highlighted_lines = highlight_new_lines(entry, rows)
@@ -255,13 +267,16 @@ class GitPaneApp(App[None]):
         super().__init__()
         self.root = root
         self.cwd = cwd or root
-        self.selection: tuple[str, Side] | None = None
+        self.selection: DiffEntry | None = None
         self.request_id = 0
+        self.commit_files_request_id = 0
         self.preview_request_id = 0
         self.diff_wrapped = False
         self.preview_wrapped = False
 
     def compose(self) -> ComposeResult:
+        commit_tree: Tree[Commit | CommitFile] = Tree("", id="commit-tree")
+        commit_tree.show_root = False
         with TabbedContent(id="main-tabs"):
             with TabPane("Changes", id="changes-tab"):
                 yield Horizontal(
@@ -270,6 +285,8 @@ class GitPaneApp(App[None]):
                         ListView(id="staged-list"),
                         Static("Unstaged"),
                         ListView(id="unstaged-list"),
+                        Static("Commits"),
+                        commit_tree,
                         id="sidebar",
                     ),
                     CodeScroll(Static(id="diff"), id="diff-scroll"),
@@ -284,10 +301,12 @@ class GitPaneApp(App[None]):
 
     async def on_mount(self) -> None:
         await self.refresh_status()
+        self.refresh_history()
         self.refresh_files()
 
     async def action_refresh(self) -> None:
         await self.refresh_status()
+        self.refresh_history()
         self.refresh_files()
 
     async def action_toggle_file(self) -> None:
@@ -360,6 +379,24 @@ class GitPaneApp(App[None]):
             unstaged_list.index = 0
             unstaged_list.focus()
 
+    def refresh_history(self) -> None:
+        """Reload the latest commits on the current branch."""
+        self.commit_files_request_id += 1
+        tree = self.query_one("#commit-tree", Tree)
+        tree.clear()
+        commits = git.commits(self.root)
+        for commit in commits:
+            tree.root.add(format_commit_label(commit), commit)
+
+        tree.loading = False
+        if (
+            commits
+            and not self.query_one("#staged-list", ListView).children
+            and not self.query_one("#unstaged-list", ListView).children
+        ):
+            tree.select_node(tree.root.children[0])
+            tree.focus()
+
     def refresh_files(self) -> None:
         """Reload the file tree rooted at the launch directory."""
         self.preview_request_id += 1
@@ -387,15 +424,17 @@ class GitPaneApp(App[None]):
         """Start loading the diff for a selected file entry."""
         if not isinstance(event.item, FileItem):
             return
+        self.request_diff(event.item.entry)
 
-        entry = event.item.entry
-        self.selection = (entry.path, entry.side)
+    def request_diff(self, entry: DiffEntry) -> None:
+        """Start loading a working-tree or historical diff."""
+        self.selection = entry
         self.request_id += 1
         self.query_one("#diff-scroll", VerticalScroll).loading = True
         self.load_diff(entry, self.request_id)
 
     @work(thread=True, exclusive=True, group="diff")
-    def load_diff(self, entry: FileEntry, token: int) -> None:
+    def load_diff(self, entry: DiffEntry, token: int) -> None:
         """Load a diff on a thread worker and hand the result to the app."""
         view = load_diff_view(self.root, entry)
         self.call_from_thread(self.apply_diff_view, view, token)
@@ -414,15 +453,48 @@ class GitPaneApp(App[None]):
                 diff_scroll.scroll_to, 0, view.first_change, animate=False
             )
 
-    def on_tree_node_selected(self, event: Tree.NodeSelected[Path]) -> None:
-        """Start loading the selected file on a thread worker."""
-        path = event.node.data
-        if path is None:
+    def on_tree_node_selected(self, event: Tree.NodeSelected[object]) -> None:
+        """Handle commit expansion, historical diffs, and file previews."""
+        data = event.node.data
+        if isinstance(data, Commit):
+            if event.node.children:
+                event.node.expand()
+                return
+            self.commit_files_request_id += 1
+            self.query_one("#commit-tree", Tree).loading = True
+            self.load_commit_files(data, event.node, self.commit_files_request_id)
+            return
+        if isinstance(data, CommitFile):
+            self.request_diff(data)
+            return
+        if not isinstance(data, Path):
             return
         self.preview_request_id += 1
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
         preview_scroll.loading = True
-        self.load_preview(path, self.preview_request_id)
+        self.load_preview(data, self.preview_request_id)
+
+    @work(thread=True, exclusive=True, group="commit-files")
+    def load_commit_files(
+        self, commit: Commit, node: TreeNode[object], token: int
+    ) -> None:
+        """Load one commit's changed files on a thread worker."""
+        entries = git.commit_files(self.root, commit)
+        self.call_from_thread(self.apply_commit_files, entries, node, token)
+
+    def apply_commit_files(
+        self, entries: list[CommitFile], node: TreeNode[object], token: int
+    ) -> None:
+        """Populate a commit node if it is still the selected request."""
+        if not is_current_request(token, self.commit_files_request_id):
+            return
+        tree = self.query_one("#commit-tree", Tree)
+        tree.loading = False
+        for entry in entries:
+            node.add_leaf(Text(f"{entry.status} {entry.path}"), entry)
+        if not entries:
+            node.add_leaf(Text("(no changed files)"))
+        node.expand()
 
     @work(thread=True, exclusive=True, group="preview")
     def load_preview(self, path: Path, token: int) -> None:

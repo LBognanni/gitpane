@@ -110,7 +110,7 @@ def test_renderer_diff_backgrounds_match_tcss(kind: str, variable: str) -> None:
             ("background: $raised-surface", "color: $muted-text", "text-style: bold"),
         ),
         (
-            "#staged-list,\n#unstaged-list",
+            "#staged-list,\n#unstaged-list,\n#commit-tree",
             ("background: $surface", "color: $text", "border: solid $border"),
         ),
         (
@@ -166,7 +166,7 @@ def test_list_states_have_the_locked_hierarchy() -> None:
 def test_layout_and_diff_scroll_contracts_are_retained() -> None:
     stylesheet = _stylesheet()
     sidebar = _rule(stylesheet, "#sidebar")
-    lists = _rule(stylesheet, "#staged-list,\n#unstaged-list")
+    lists = _rule(stylesheet, "#staged-list,\n#unstaged-list,\n#commit-tree")
     diff_scroll = _rule(stylesheet, "#diff-scroll")
     diff = _rule(stylesheet, "#diff")
 
