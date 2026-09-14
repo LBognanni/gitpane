@@ -337,7 +337,7 @@ match `.artifacts/performance-baseline.json` before marking the story complete.
 | M1-S1 — Marker and workloads | Accepted | — | Registered marker and deterministic generators |
 | M1-S2 — Preparation and memory | Accepted | M1-S1 | Raw report with isolated CPU/allocation phases |
 | M1-S3 — Rendering and interaction | Accepted | M1-S1, M1-S2 | Headless current-viewer measurements |
-| M1-S4 — Baseline documentation | Not started | M1-S1–M1-S3 | `docs/performance-baseline.md` |
+| M1-S4 — Baseline documentation | Accepted | M1-S1–M1-S3 | `docs/performance-baseline.md` |
 
 ## Verification
 
