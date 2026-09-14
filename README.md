@@ -9,6 +9,7 @@ diffs, previews repository files, and can stage or unstage whole files.
 - Python 3.11 or later
 - [uv](https://docs.astral.sh/uv/)
 - Git
+- A [Nerd Font](https://www.nerdfonts.com/) configured in your terminal
 
 Run GitPane from inside a Git repository.
 

@@ -197,14 +197,23 @@ def test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views(
         async with app.run_test() as pilot:
             await pilot.pause()
             tree = app.query_one("#files-tree", Tree)
-            assert str(tree.root.label) == str(cwd)
+            assert tree.guide_depth == 3
+            assert str(tree.root.label) == f" {cwd}"
             assert [str(node.label) for node in tree.root.children] == [
-                "[directory]",
-                "[red]top.txt",
+                " [directory]",
+                "󰈙 [red]top.txt",
             ]
             directory = tree.root.children[0]
+            assert directory.data == cwd / "[directory]"
             assert directory.children[0].data == cwd / "[directory]/example.py"
             assert tree.root.children[1].data == cwd / "[red]top.txt"
+
+            directory.expand()
+            await pilot.pause()
+            assert str(directory.label) == " [directory]"
+            directory.collapse()
+            await pilot.pause()
+            assert str(directory.label) == " [directory]"
 
             await pilot.press("r")
             await pilot.pause()

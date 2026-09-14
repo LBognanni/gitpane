@@ -22,7 +22,7 @@ from textual.scrollbar import ScrollBar, ScrollTo
 from textual.widgets import ListItem, ListView, Static, TabbedContent, TabPane, Tree
 from textual.widgets.tree import TreeNode
 
-from gitpane import diff, git
+from gitpane import diff, git, icons
 from gitpane.diff import Row
 from gitpane.model import Commit, CommitFile, FileEntry, Side
 from gitpane.widgets import HorizontalSplitter, VerticalSplitter
@@ -278,6 +278,12 @@ class GitPaneApp(App[None]):
     def compose(self) -> ComposeResult:
         commit_tree: Tree[Commit | CommitFile] = Tree("", id="commit-tree")
         commit_tree.show_root = False
+        files_tree: Tree[Path] = Tree(
+            icons.folder_label(str(self.cwd), expanded=True),
+            self.cwd,
+            id="files-tree",
+        )
+        files_tree.guide_depth = 3
         with TabbedContent(id="main-tabs"):
             with TabPane("Changes", id="changes-tab"):
                 yield Horizontal(
@@ -314,7 +320,7 @@ class GitPaneApp(App[None]):
                 )
             with TabPane("Files", id="files-tab"):
                 yield Horizontal(
-                    Tree[Path](Text(str(self.cwd)), id="files-tree"),
+                    files_tree,
                     Vertical(
                         Static(id="preview-title", classes="viewer-title"),
                         CodeScroll(Static(id="preview"), id="preview-scroll"),
@@ -429,7 +435,7 @@ class GitPaneApp(App[None]):
         self.preview_request_id += 1
         tree = self.query_one("#files-tree", Tree)
         tree.clear()
-        tree.root.set_label(Text(str(self.cwd)))
+        tree.root.set_label(icons.folder_label(str(self.cwd), expanded=True))
         tree.root.expand()
         nodes: dict[tuple[str, ...], TreeNode[Path]] = {(): tree.root}
         for relative in git.files(self.cwd):
@@ -438,9 +444,14 @@ class GitPaneApp(App[None]):
             for part in parts[:-1]:
                 branch_parts = (*parent_parts, part)
                 if branch_parts not in nodes:
-                    nodes[branch_parts] = nodes[parent_parts].add(Text(part))
+                    directory = self.cwd.joinpath(*branch_parts)
+                    nodes[branch_parts] = nodes[parent_parts].add(
+                        icons.folder_label(part, expanded=False), directory
+                    )
                 parent_parts = branch_parts
-            nodes[parent_parts].add_leaf(Text(parts[-1]), self.cwd / relative)
+            nodes[parent_parts].add_leaf(
+                icons.file_label(parts[-1]), self.cwd / relative
+            )
 
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
         self.query_one("#preview-title", Static).update("")
@@ -485,29 +496,45 @@ class GitPaneApp(App[None]):
     def on_tree_node_selected(self, event: Tree.NodeSelected[object]) -> None:
         """Handle commit expansion, historical diffs, and file previews."""
         data = event.node.data
+        if event.control.id == "files-tree":
+            if event.node.allow_expand or not isinstance(data, Path):
+                return
+            self.preview_request_id += 1
+            self.query_one("#preview-title", Static).update(
+                str(data.relative_to(self.root))
+            )
+            preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
+            preview_scroll.loading = True
+            self.load_preview(data, self.preview_request_id)
+            return
         if isinstance(data, Commit):
             return
         if isinstance(data, CommitFile):
             self.request_diff(data)
-            return
-        if not isinstance(data, Path):
-            return
-        self.preview_request_id += 1
-        self.query_one("#preview-title", Static).update(
-            str(data.relative_to(self.root))
-        )
-        preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
-        preview_scroll.loading = True
-        self.load_preview(data, self.preview_request_id)
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded[object]) -> None:
         """Load a commit's files when either its arrow or label expands it."""
+        if event.control.id == "files-tree":
+            path = event.node.data
+            if isinstance(path, Path):
+                name = str(self.cwd) if event.node is event.control.root else path.name
+                event.node.set_label(icons.folder_label(name, expanded=True))
+            return
         commit = event.node.data
         if not isinstance(commit, Commit) or event.node.children:
             return
         self.commit_files_request_id += 1
         self.query_one("#commit-tree", Tree).loading = True
         self.load_commit_files(commit, event.node, self.commit_files_request_id)
+
+    def on_tree_node_collapsed(self, event: Tree.NodeCollapsed[object]) -> None:
+        """Show a closed icon when a filesystem directory is collapsed."""
+        if event.control.id != "files-tree":
+            return
+        path = event.node.data
+        if isinstance(path, Path):
+            name = str(self.cwd) if event.node is event.control.root else path.name
+            event.node.set_label(icons.folder_label(name, expanded=False))
 
     @work(thread=True, exclusive=True, group="commit-files")
     def load_commit_files(
