@@ -89,7 +89,7 @@ def test_diff_preparation(
     monkeypatch: pytest.MonkeyPatch,
     performance_report: PerformanceReport,
 ) -> None:
-    """Keep parsing, lexing, rendering, and cold-cache preparation separate."""
+    """Keep parsing, lexing, per-line rendering, and cold-cache preparation separate."""
     patch = generate_patch(workload)
     rows = diff.parse(patch)
     highlighted = app.highlight_new_lines(_ENTRY, rows)

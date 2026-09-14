@@ -47,7 +47,7 @@ def format_commit_label(commit: Commit) -> Text:
 class DiffView:
     """A prepared, ready-to-render diff for one file entry."""
 
-    text: Text
+    lines: tuple[Text, ...]
     first_change: int | None
 
 
@@ -65,9 +65,9 @@ MAX_PREVIEW_BYTES = 1024 * 1024
 def build_diff_view(entry: DiffEntry, patch: str) -> DiffView:
     """Build the prepared diff view for an entry's patch text."""
     rows = diff.parse(patch)
-    text = render_diff_rows(entry, rows)
+    lines = render_diff_rows(entry, rows)
     first_change = diff.first_change_index(rows)
-    return DiffView(text, first_change)
+    return DiffView(lines, first_change)
 
 
 def load_diff_view(root: Path, entry: DiffEntry) -> DiffView:
@@ -129,7 +129,7 @@ def lexer_for_entry(entry: DiffEntry, source: str) -> str:
 
 def highlight_new_lines(entry: DiffEntry, rows: Sequence[Row]) -> list[Text]:
     """Highlight the reconstructed new side as individual Rich text lines."""
-    new_rows = [row for row in rows if row.kind != "remove"]
+    new_rows = [row for row in rows if row.new_no is not None]
     if not new_rows:
         return []
 
@@ -153,32 +153,41 @@ def scrollbar_click_target(
     return max(0, min(target, virtual_size - window_size))
 
 
-def render_diff_rows(entry: DiffEntry, rows: list[Row]) -> Text:
-    """Render parsed diff rows as one plain Rich text value."""
-    text = Text()
+def render_diff_rows(entry: DiffEntry, rows: list[Row]) -> tuple[Text, ...]:
+    """Render parsed diff rows as independently displayable Rich text lines."""
     highlighted_lines = highlight_new_lines(entry, rows)
     styles = {
         "add": Style(bgcolor="#142b1d"),
         "remove": Style(bgcolor="#351b20"),
     }
     new_side_index = 0
+    lines: list[Text] = []
 
-    for index, row in enumerate(rows):
-        if index:
-            text.append("\n")
-        row_start = len(text)
+    for row in rows:
+        line = Text()
         marker = {"add": "+", "remove": "-"}.get(row.kind, " ")
         old_no = "" if row.old_no is None else str(row.old_no)
         new_no = "" if row.new_no is None else str(row.new_no)
-        text.append(f"{marker} {old_no:>4} {new_no:>4} ")
+        line.append(f"{marker} {old_no:>4} {new_no:>4} ")
         if row.new_no is None:
-            text.append(row.text)
+            line.append(row.text)
         else:
-            text.append_text(highlighted_lines[new_side_index])
+            line.append_text(highlighted_lines[new_side_index])
             new_side_index += 1
         if style := styles.get(row.kind):
-            text.stylize(style, row_start, len(text))
+            line.stylize(style, 0, len(line))
+        lines.append(line)
 
+    return tuple(lines)
+
+
+def join_diff_lines(lines: Sequence[Text]) -> Text:
+    """Join prepared diff lines for the temporary Static display fallback."""
+    text = Text()
+    for index, line in enumerate(lines):
+        if index:
+            text.append("\n")
+        text.append_text(line)
     return text
 
 
@@ -484,7 +493,7 @@ class GitPaneApp(App[None]):
         if not is_current_request(token, self.request_id):
             return
 
-        self.query_one("#diff", Static).update(view.text)
+        self.query_one("#diff", Static).update(join_diff_lines(view.lines))
         diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
         diff_scroll.loading = False
         diff_scroll.scroll_to(0, 0, animate=False)

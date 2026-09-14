@@ -20,6 +20,7 @@ from gitpane.app import (
     highlight_new_lines,
     is_current_request,
     is_prefix_offset,
+    join_diff_lines,
     lexer_for_entry,
     load_diff_view,
     load_preview_view,
@@ -80,7 +81,7 @@ def test_load_diff_view_forwards_root_and_entry_to_git_diff_then_builds(
     root = Path("/repo")
     entry = FileEntry("file.txt", Side.STAGED, "M")
     patch = "raw patch"
-    view = DiffView(Text("built"), None)
+    view = DiffView((Text("built"),), None)
     calls: list[tuple[object, ...]] = []
 
     def fake_diff(received_root: Path, received_entry: FileEntry) -> str:
@@ -470,7 +471,7 @@ def test_is_current_request_matches_only_the_current_token(
     assert is_current_request(token, current) is expected
 
 
-def test_build_diff_view_renders_the_exact_text_of_render_diff_rows(
+def test_build_diff_view_prepares_independent_lines_without_a_joined_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entry = FileEntry("example.txt", Side.STAGED, "M")
@@ -483,8 +484,14 @@ def test_build_diff_view_renders_the_exact_text_of_render_diff_rows(
 
     view = build_diff_view(entry, "irrelevant patch text")
 
-    assert view.text.plain == render_diff_rows(entry, rows).plain
-    assert view.text.spans == render_diff_rows(entry, rows).spans
+    assert isinstance(view.lines, tuple)
+    assert [line.plain for line in view.lines] == [
+        "     1    1 context [not markup]",
+        "-    2      removed",
+        "+         2 added",
+    ]
+    assert view.lines == render_diff_rows(entry, rows)
+    assert not hasattr(view, "text")
 
 
 def test_build_diff_view_reports_first_change_for_a_diff_with_changes(
@@ -529,9 +536,11 @@ def test_build_diff_view_caches_repeated_identical_entry_and_patch(
         calls.append("parse")
         return [Row(1, 1, received_patch, "context")]
 
-    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+    def fake_render_diff_rows(
+        received_entry: FileEntry, rows: list[Row]
+    ) -> tuple[Text, ...]:
         calls.append("render")
-        return Text(rows[0].text)
+        return (Text(rows[0].text),)
 
     monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
     monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
@@ -541,6 +550,7 @@ def test_build_diff_view_caches_repeated_identical_entry_and_patch(
 
     assert calls == ["parse", "render"]
     assert first is second
+    assert first.lines is second.lines
 
 
 def test_build_diff_view_rebuilds_for_a_different_patch_on_the_same_entry(
@@ -553,9 +563,11 @@ def test_build_diff_view_rebuilds_for_a_different_patch_on_the_same_entry(
         calls.append("parse")
         return [Row(1, 1, received_patch, "context")]
 
-    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+    def fake_render_diff_rows(
+        received_entry: FileEntry, rows: list[Row]
+    ) -> tuple[Text, ...]:
         calls.append("render")
-        return Text(rows[0].text)
+        return (Text(rows[0].text),)
 
     monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
     monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
@@ -564,8 +576,8 @@ def test_build_diff_view_rebuilds_for_a_different_patch_on_the_same_entry(
     second = build_diff_view(entry, "patch b")
 
     assert calls == ["parse", "render", "parse", "render"]
-    assert first.text.plain == "patch a"
-    assert second.text.plain == "patch b"
+    assert first.lines[0].plain == "patch a"
+    assert second.lines[0].plain == "patch b"
 
 
 def test_build_diff_view_rebuilds_for_a_different_entry_with_the_same_patch(
@@ -578,9 +590,11 @@ def test_build_diff_view_rebuilds_for_a_different_entry_with_the_same_patch(
         calls.append("parse")
         return [Row(1, 1, received_patch, "context")]
 
-    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+    def fake_render_diff_rows(
+        received_entry: FileEntry, rows: list[Row]
+    ) -> tuple[Text, ...]:
         calls.append("render")
-        return Text(f"{received_entry.path}:{rows[0].text}")
+        return (Text(f"{received_entry.path}:{rows[0].text}"),)
 
     monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
     monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
@@ -592,8 +606,8 @@ def test_build_diff_view_rebuilds_for_a_different_entry_with_the_same_patch(
     second = build_diff_view(entry_b, patch)
 
     assert calls == ["parse", "render", "parse", "render"]
-    assert first.text.plain == "a.txt:shared patch"
-    assert second.text.plain == "b.txt:shared patch"
+    assert first.lines[0].plain == "a.txt:shared patch"
+    assert second.lines[0].plain == "b.txt:shared patch"
 
 
 def test_build_diff_view_evicts_the_oldest_entry_after_a_fifth_distinct_key(
@@ -605,9 +619,11 @@ def test_build_diff_view_evicts_the_oldest_entry_after_a_fifth_distinct_key(
         calls.append("parse")
         return [Row(1, 1, received_patch, "context")]
 
-    def fake_render_diff_rows(received_entry: FileEntry, rows: list[Row]) -> Text:
+    def fake_render_diff_rows(
+        received_entry: FileEntry, rows: list[Row]
+    ) -> tuple[Text, ...]:
         calls.append("render")
-        return Text(rows[0].text)
+        return (Text(rows[0].text),)
 
     monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
     monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
@@ -721,7 +737,7 @@ def test_highlight_new_lines_skips_lexer_and_highlighter_for_all_removals(
 
 def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() -> None:
     entry = FileEntry("example.txt", Side.STAGED, "M")
-    rendered = render_diff_rows(
+    lines = render_diff_rows(
         entry,
         [
             Row(1, 1, "context [not markup]", "context"),
@@ -729,6 +745,7 @@ def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() ->
             Row(None, 2, "added", "add"),
         ],
     )
+    rendered = join_diff_lines(lines)
 
     assert (
         rendered.plain
@@ -742,13 +759,26 @@ def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() ->
         (33, 52, Style(bgcolor="#351b20")),
         (53, 70, Style(bgcolor="#142b1d")),
     ]
+    assert [
+        [
+            (span.start, span.end, span.style)
+            for span in line.spans
+            if span.style in {Style(bgcolor="#351b20"), Style(bgcolor="#142b1d")}
+        ]
+        for line in lines
+    ] == [
+        [],
+        [(0, 19, Style(bgcolor="#351b20"))],
+        [(0, 17, Style(bgcolor="#142b1d"))],
+    ]
 
 
 def test_render_diff_rows_preserves_empty_rows_without_extra_newlines() -> None:
-    rendered = render_diff_rows(
+    lines = render_diff_rows(
         FileEntry("empty.txt", Side.STAGED, "M"), [Row(None, None, "", "context")]
     )
 
+    rendered = join_diff_lines(lines)
     assert rendered.plain == "            "
     assert rendered.spans == []
 
@@ -774,7 +804,8 @@ def test_render_diff_rows_projects_highlights_by_new_side_position(
 
     monkeypatch.setattr("gitpane.app.highlight_new_lines", fake_highlight_new_lines)
 
-    rendered = render_diff_rows(entry, rows)
+    lines = render_diff_rows(entry, rows)
+    rendered = join_diff_lines(lines)
 
     assert calls == [(entry, rows)]
     assert (
@@ -819,6 +850,16 @@ def test_render_diff_rows_projects_highlights_by_new_side_position(
         and style.bgcolor is not None
         for start, end, style in spans
     )
+    assert [(span.start, span.end, span.style) for span in lines[0].spans] == [
+        (12, 19, Style(color="cyan"))
+    ]
+    assert [(span.start, span.end, span.style) for span in lines[1].spans] == [
+        (0, 19, Style(bgcolor="#351b20"))
+    ]
+    assert [(span.start, span.end, span.style) for span in lines[2].spans] == [
+        (12, 17, Style(color="magenta")),
+        (0, 17, Style(bgcolor="#142b1d")),
+    ]
 
 
 @pytest.mark.parametrize(

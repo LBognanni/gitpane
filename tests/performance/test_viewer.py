@@ -9,7 +9,13 @@ import pytest
 from rich.syntax import Syntax
 from textual.pilot import Pilot
 
-from gitpane.app import DiffView, PreviewView, build_diff_view, load_preview_view
+from gitpane.app import (
+    DiffView,
+    PreviewView,
+    build_diff_view,
+    join_diff_lines,
+    load_preview_view,
+)
 from gitpane.model import FileEntry, Side
 from tests.performance.reporting import PerformanceReport
 from tests.performance.viewer_harness import ViewerContent, ViewerHarness
@@ -37,7 +43,7 @@ def _prepare_content(workload: Workload, tmp_path: Path) -> ViewerContent:
     if workload.viewer == "diff":
         diff_view = build_diff_view(_ENTRY, generate_patch(workload))
         assert isinstance(diff_view, DiffView)
-        return diff_view.text
+        return join_diff_lines(diff_view.lines)
 
     path = tmp_path / "workload.py"
     path.write_text(generate_preview(workload), encoding="utf-8")

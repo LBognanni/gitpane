@@ -85,12 +85,12 @@ def test_renderer_diff_backgrounds_match_tcss(kind: str, variable: str) -> None:
         if kind == "add"
         else Row(1, None, "removed", "remove")
     )
-    rendered = render_diff_rows(FileEntry("example.txt", Side.STAGED, "M"), [row])
+    line = render_diff_rows(FileEntry("example.txt", Side.STAGED, "M"), [row])[0]
 
     expected = _rgb(_variables(_stylesheet())[variable])
     backgrounds = [
         span.style
-        for span in rendered.spans
+        for span in line.spans
         if isinstance(span.style, Style)
         and span.style.bgcolor is not None
         and tuple(span.style.bgcolor.get_truecolor()) == expected
