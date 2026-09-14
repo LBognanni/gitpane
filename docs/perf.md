@@ -169,6 +169,14 @@ Functional tests should verify visible-line rendering, scrolling bounds,
 styling, cache invalidation, and first-change positioning without relying on
 machine-specific timing.
 
+All pytest benchmarks, timing checks, and other resource-intensive performance
+workloads must use `@pytest.mark.performance`, with the marker registered in
+`pyproject.toml`. Routine feature work runs
+`uv run pytest -m "not performance"`; performance work runs the isolated suite
+explicitly with `uv run pytest -m performance`. Functional correctness tests
+for viewer behavior remain unmarked so they continue to run during ordinary
+feature development.
+
 ## Implementation order
 
 1. Establish the benchmark and profile the current implementation.

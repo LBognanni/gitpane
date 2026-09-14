@@ -21,13 +21,17 @@ and the results identify where time and memory are spent.
    repeated scrolling, wrap toggling, and retained cache memory separately.
 4. Record the environment and baseline results so later milestones can be
    compared against the same workload.
-5. Add only stable functional assertions to the normal test suite. Keep
+5. Register a `performance` pytest marker and apply it to every benchmark,
+   timing check, and resource-intensive performance workload.
+6. Add only stable functional assertions to the normal test suite. Keep
    machine-dependent timing results report-only unless a reliable CI threshold
    is demonstrated.
 
 ## Acceptance criteria
 
 - One documented command runs the benchmark from the repository root.
+- `uv run pytest -m "not performance"` excludes every performance workload,
+  while `uv run pytest -m performance` runs it explicitly.
 - Workloads are deterministic and do not invoke or benchmark Git itself.
 - Diff and preview measurements are reported separately.
 - Rendering time is distinguishable from parsing and highlighting time.
@@ -41,7 +45,8 @@ and the results identify where time and memory are spent.
 uv run ruff check gitpane tests
 uv run ruff format --check gitpane tests
 uv run mypy gitpane tests
-uv run pytest
+uv run pytest -m "not performance"
+uv run pytest -m performance
 ```
 
 # Milestone 2: Virtualized diff viewer
@@ -89,7 +94,8 @@ The current diff appearance and navigation behavior must remain intact.
 uv run ruff check gitpane tests
 uv run ruff format --check gitpane tests
 uv run mypy gitpane tests
-uv run pytest
+uv run pytest -m "not performance"
+uv run pytest -m performance
 ```
 
 # Milestone 3: Shared preview and resource guardrails
@@ -141,7 +147,8 @@ or faster.
 uv run ruff check gitpane tests
 uv run ruff format --check gitpane tests
 uv run mypy gitpane tests
-uv run pytest
+uv run pytest -m "not performance"
+uv run pytest -m performance
 ```
 
 # Milestone 4: Wrapped-mode optimization
@@ -191,7 +198,8 @@ first three milestones.
 uv run ruff check gitpane tests
 uv run ruff format --check gitpane tests
 uv run mypy gitpane tests
-uv run pytest
+uv run pytest -m "not performance"
+uv run pytest -m performance
 ```
 
 # Deferred product decisions
