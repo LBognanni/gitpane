@@ -227,7 +227,10 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
     requested: list[tuple[CommitFile, int]] = []
 
     monkeypatch.setattr(
-        "gitpane.app.git.status", lambda root: RepoState(root, [], [], "main")
+        "gitpane.app.git.status",
+        lambda root: RepoState(
+            root, [FileEntry("working.txt", Side.STAGED, "M")], [], "main"
+        ),
     )
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [commit])
     monkeypatch.setattr("gitpane.app.git.commit_files", lambda _root, _commit: [entry])
@@ -248,7 +251,7 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
                 str(app.query_one("#branch-status", Static).content) == "Branch: main"
             )
 
-            tree.select_node(commit_node)
+            assert await pilot.click(tree, offset=(1, 1))
             await app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -256,6 +259,21 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             assert len(commit_node.children) == 1
             file_node = commit_node.children[0]
             assert str(file_node.label) == "M src/history.py"
+
+            assert await pilot.click(tree, offset=(8, 1))
+            await pilot.pause()
+            assert commit_node.is_collapsed
+
+            assert await pilot.click(tree, offset=(8, 1))
+            await pilot.pause()
+            assert commit_node.is_expanded
+
+            assert await pilot.click(tree, offset=(1, 1))
+            await pilot.pause()
+            assert commit_node.is_collapsed
+
+            commit_node.expand()
+            await pilot.pause()
 
             tree.select_node(file_node)
             await pilot.pause()

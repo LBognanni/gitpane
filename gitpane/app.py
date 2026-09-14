@@ -486,12 +486,6 @@ class GitPaneApp(App[None]):
         """Handle commit expansion, historical diffs, and file previews."""
         data = event.node.data
         if isinstance(data, Commit):
-            if event.node.children:
-                event.node.expand()
-                return
-            self.commit_files_request_id += 1
-            self.query_one("#commit-tree", Tree).loading = True
-            self.load_commit_files(data, event.node, self.commit_files_request_id)
             return
         if isinstance(data, CommitFile):
             self.request_diff(data)
@@ -505,6 +499,15 @@ class GitPaneApp(App[None]):
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
         preview_scroll.loading = True
         self.load_preview(data, self.preview_request_id)
+
+    def on_tree_node_expanded(self, event: Tree.NodeExpanded[object]) -> None:
+        """Load a commit's files when either its arrow or label expands it."""
+        commit = event.node.data
+        if not isinstance(commit, Commit) or event.node.children:
+            return
+        self.commit_files_request_id += 1
+        self.query_one("#commit-tree", Tree).loading = True
+        self.load_commit_files(commit, event.node, self.commit_files_request_id)
 
     @work(thread=True, exclusive=True, group="commit-files")
     def load_commit_files(
@@ -526,7 +529,6 @@ class GitPaneApp(App[None]):
             node.add_leaf(Text(f"{entry.status} {entry.path}"), entry)
         if not entries:
             node.add_leaf(Text("(no changed files)"))
-        node.expand()
 
     @work(thread=True, exclusive=True, group="preview")
     def load_preview(self, path: Path, token: int) -> None:
