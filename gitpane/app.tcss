@@ -17,6 +17,21 @@ Screen {
     color: $text;
 }
 
+#main-tabs {
+    height: 1fr;
+}
+
+Tabs {
+    background: $surface;
+    color: $muted-text;
+}
+
+Tab.--active {
+    background: $raised-surface;
+    color: $text;
+    text-style: bold;
+}
+
 #body {
     height: 1fr;
     background: $canvas;
@@ -77,6 +92,45 @@ ListView:focus > ListItem.--highlight {
 }
 
 #diff {
+    width: auto;
+    text-wrap: nowrap;
+    background: $diff-background;
+    color: $text;
+}
+
+#files-body {
+    height: 1fr;
+    background: $canvas;
+}
+
+#files-tree {
+    width: 30;
+    min-width: 30;
+    max-width: 30;
+    background: $surface;
+    color: $text;
+    border-right: solid $border;
+    scrollbar-color: $accent;
+}
+
+#files-tree:focus {
+    border: solid $focus;
+}
+
+#files-tree > .tree--cursor {
+    background: $focused-selection;
+    color: $text;
+    text-style: bold;
+}
+
+#preview-scroll {
+    overflow: scroll scroll;
+    background: $diff-background;
+    color: $text;
+    scrollbar-color: $accent;
+}
+
+#preview {
     width: auto;
     text-wrap: nowrap;
     background: $diff-background;

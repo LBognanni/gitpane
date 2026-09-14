@@ -1,11 +1,17 @@
+import asyncio
 from pathlib import Path
 
 import pytest
 from rich.style import Style
+from rich.syntax import Syntax
 from rich.text import Text
+from textual.widgets import Tree
 
 from gitpane.app import (
+    MAX_PREVIEW_BYTES,
     DiffView,
+    GitPaneApp,
+    PreviewView,
     build_diff_view,
     format_file_label,
     highlight_new_lines,
@@ -13,12 +19,13 @@ from gitpane.app import (
     is_prefix_offset,
     lexer_for_entry,
     load_diff_view,
+    load_preview_view,
     reconstruct_new_source,
     render_diff_rows,
     toggle_file,
 )
 from gitpane.diff import Row
-from gitpane.model import FileEntry, Side
+from gitpane.model import FileEntry, RepoState, Side
 
 
 @pytest.mark.parametrize(
@@ -67,6 +74,125 @@ def test_load_diff_view_forwards_root_and_entry_to_git_diff_then_builds(
 
     assert load_diff_view(root, entry) is view
     assert calls == [("diff", root, entry), ("build", entry, patch)]
+
+
+def test_load_preview_view_builds_numbered_non_wrapping_syntax(tmp_path: Path) -> None:
+    path = tmp_path / "example.py"
+    path.write_text("answer = 42\n")
+
+    view = load_preview_view(path)
+
+    assert isinstance(view, PreviewView)
+    assert isinstance(view.content, Syntax)
+    assert view.content.code == "answer = 42\n"
+    assert view.content.line_numbers is True
+    assert view.content.word_wrap is False
+
+
+@pytest.mark.parametrize(
+    ("name", "contents", "message"),
+    [
+        ("binary.dat", b"before\0after", "Binary files cannot be previewed."),
+        ("invalid.txt", b"\xff", "File is not valid UTF-8."),
+        (
+            "large.txt",
+            b"x" * (MAX_PREVIEW_BYTES + 1),
+            "File is too large to preview (maximum 1 MiB).",
+        ),
+    ],
+)
+def test_load_preview_view_returns_friendly_messages(
+    tmp_path: Path, name: str, contents: bytes, message: str
+) -> None:
+    path = tmp_path / name
+    path.write_bytes(contents)
+
+    view = load_preview_view(path)
+
+    assert isinstance(view.content, Text)
+    assert view.content.plain == message
+
+
+def test_load_preview_view_handles_disappeared_file(tmp_path: Path) -> None:
+    view = load_preview_view(tmp_path / "gone.txt")
+
+    assert isinstance(view.content, Text)
+    assert view.content.plain == "File is no longer available."
+
+
+def test_load_preview_view_handles_unreadable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "unreadable.txt"
+    path.write_text("contents")
+
+    def deny_open(*_: object, **__: object) -> object:
+        raise PermissionError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", deny_open)
+        view = load_preview_view(path)
+
+    assert isinstance(view.content, Text)
+    assert view.content.plain == "File could not be read."
+
+
+def test_load_preview_view_rejects_non_regular_files(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("outside the selected path")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+
+    view = load_preview_view(link)
+
+    assert isinstance(view.content, Text)
+    assert view.content.plain == "Only regular files can be previewed."
+
+
+def test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repository"
+    cwd = root / "nested"
+    cwd.mkdir(parents=True)
+    calls: list[tuple[str, Path]] = []
+
+    def fake_status(received_root: Path) -> RepoState:
+        calls.append(("status", received_root))
+        return RepoState(received_root, [], [])
+
+    def fake_files(received_cwd: Path) -> list[str]:
+        calls.append(("files", received_cwd))
+        return ["[directory]/example.py", "[red]top.txt"]
+
+    monkeypatch.setattr("gitpane.app.git.status", fake_status)
+    monkeypatch.setattr("gitpane.app.git.files", fake_files)
+
+    async def exercise() -> None:
+        app = GitPaneApp(root, cwd)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#files-tree", Tree)
+            assert str(tree.root.label) == str(cwd)
+            assert [str(node.label) for node in tree.root.children] == [
+                "[directory]",
+                "[red]top.txt",
+            ]
+            directory = tree.root.children[0]
+            assert directory.children[0].data == cwd / "[directory]/example.py"
+            assert tree.root.children[1].data == cwd / "[red]top.txt"
+
+            await pilot.press("r")
+            await pilot.pause()
+
+    asyncio.run(exercise())
+
+    assert calls == [
+        ("status", root),
+        ("files", cwd),
+        ("status", root),
+        ("files", cwd),
+    ]
 
 
 @pytest.mark.parametrize(

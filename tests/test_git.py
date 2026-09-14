@@ -195,6 +195,39 @@ def test_diff_builds_command_and_forwards_output(
     assert calls == [(Path("/repository"), expected_args, expected_kwargs)]
 
 
+def test_files_requests_scoped_tracked_and_non_ignored_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_run(cwd: Path, *args: str) -> str:
+        calls.append((cwd, args))
+        return "z-last.txt\0directory/a file.py\0a-first.txt\0"
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    cwd = Path("/repository/subdirectory")
+    assert gitpane.git.files(cwd) == [
+        "a-first.txt",
+        "directory/a file.py",
+        "z-last.txt",
+    ]
+    assert calls == [
+        (
+            cwd,
+            (
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--",
+                ".",
+            ),
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     ("operation", "expected_args"),
     [

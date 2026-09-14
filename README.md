@@ -1,8 +1,8 @@
 # gitpane
 
-A terminal Git status and diff viewer built with Python and Textual. It shows
-staged and unstaged files in a split view, displays full-context unified diffs,
-and can stage or unstage whole files.
+A terminal Git status, diff, and file browser built with Python and Textual. It
+shows staged and unstaged files, displays full-context unified diffs, previews
+repository files, and can stage or unstage whole files.
 
 ## Requirements
 
@@ -30,8 +30,10 @@ uv sync --dev
 uv run python -m gitpane.app
 ```
 
-The left pane lists staged files first, then unstaged files. Select a file to
-show its diff in the right pane. Long lines can be scrolled horizontally.
+The **Changes** tab lists staged files first, then unstaged files. Select a file
+to show its diff in the right pane. The **Files** tab shows tracked and
+non-ignored untracked files below the directory where GitPane was launched;
+select one for a syntax-highlighted preview. Long lines scroll horizontally.
 
 ## Controls
 
@@ -41,11 +43,14 @@ show its diff in the right pane. Long lines can be scrolled horizontally.
 | Enter or click a file | Load its diff |
 | Space | Stage the focused unstaged file, or unstage the focused staged file |
 | Click `[ ]` | Stage or unstage that file |
-| `r` | Refresh repository status |
+| `r` | Refresh repository status and files |
+
+Use the Changes and Files tabs (or Textual's normal tab navigation) to switch
+between repository changes and the filesystem browser. Refresh reloads both.
 
 ## Current Scope
 
-GitPane supports whole-file staging and unstaging plus syntax-highlighted,
-unified diffs in an accessible dark theme. It does not yet support hunk or
-line staging, commits, conflict resolution, renames, binary files, or
-automatic file watching.
+GitPane supports whole-file staging and unstaging, syntax-highlighted unified
+diffs, and safe text-file previews up to 1 MiB in an accessible dark theme. It
+does not yet support hunk or line staging, commits, conflict resolution,
+renames, binary previews, or automatic file watching.

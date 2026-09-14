@@ -65,6 +65,21 @@ def status(root: Path) -> RepoState:
     )
 
 
+def files(cwd: Path) -> list[str]:
+    """Return tracked and non-ignored untracked files below *cwd*."""
+    output = _run(
+        cwd,
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        ".",
+    )
+    return sorted(path for path in output.split("\0") if path)
+
+
 def diff(root: Path, entry: FileEntry) -> str:
     """Return the full Git diff for *entry*."""
     if entry.side is Side.STAGED:

@@ -1,4 +1,5 @@
 import functools
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import ListItem, ListView, Static
+from textual.widgets import ListItem, ListView, Static, TabbedContent, TabPane, Tree
+from textual.widgets.tree import TreeNode
 
 from gitpane import diff, git
 from gitpane.diff import Row
@@ -32,6 +34,16 @@ class DiffView:
     first_change: int | None
 
 
+@dataclass(frozen=True)
+class PreviewView:
+    """A ready-to-render file preview or friendly error message."""
+
+    content: Syntax | Text
+
+
+MAX_PREVIEW_BYTES = 1024 * 1024
+
+
 @functools.lru_cache(maxsize=4)
 def build_diff_view(entry: FileEntry, patch: str) -> DiffView:
     """Build the prepared diff view for an entry's patch text."""
@@ -45,6 +57,34 @@ def load_diff_view(root: Path, entry: FileEntry) -> DiffView:
     """Load the diff for an entry and return its prepared view."""
     patch = git.diff(root, entry)
     return build_diff_view(entry, patch)
+
+
+def load_preview_view(path: Path) -> PreviewView:
+    """Read and prepare a bounded UTF-8 text file preview."""
+    try:
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode):
+            return PreviewView(Text("Only regular files can be previewed."))
+        if file_stat.st_size > MAX_PREVIEW_BYTES:
+            return PreviewView(Text("File is too large to preview (maximum 1 MiB)."))
+        with path.open("rb") as file:
+            data = file.read(MAX_PREVIEW_BYTES + 1)
+    except FileNotFoundError:
+        return PreviewView(Text("File is no longer available."))
+    except OSError:
+        return PreviewView(Text("File could not be read."))
+
+    if len(data) > MAX_PREVIEW_BYTES:
+        return PreviewView(Text("File is too large to preview (maximum 1 MiB)."))
+    if b"\0" in data:
+        return PreviewView(Text("Binary files cannot be previewed."))
+    try:
+        source = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return PreviewView(Text("File is not valid UTF-8."))
+
+    lexer = Syntax.guess_lexer(path.name, source)
+    return PreviewView(Syntax(source, lexer, line_numbers=True, word_wrap=False))
 
 
 def is_current_request(token: int, current: int) -> bool:
@@ -145,30 +185,42 @@ class GitPaneApp(App[None]):
         Binding("space", "toggle_file", "Toggle"),
     ]
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, cwd: Path | None = None) -> None:
         super().__init__()
         self.root = root
+        self.cwd = cwd or root
         self.selection: tuple[str, Side] | None = None
         self.request_id = 0
+        self.preview_request_id = 0
 
     def compose(self) -> ComposeResult:
-        yield Horizontal(
-            Vertical(
-                Static("Staged"),
-                ListView(id="staged-list"),
-                Static("Unstaged"),
-                ListView(id="unstaged-list"),
-                id="sidebar",
-            ),
-            VerticalScroll(Static(id="diff"), id="diff-scroll"),
-            id="body",
-        )
+        with TabbedContent(id="main-tabs"):
+            with TabPane("Changes", id="changes-tab"):
+                yield Horizontal(
+                    Vertical(
+                        Static("Staged"),
+                        ListView(id="staged-list"),
+                        Static("Unstaged"),
+                        ListView(id="unstaged-list"),
+                        id="sidebar",
+                    ),
+                    VerticalScroll(Static(id="diff"), id="diff-scroll"),
+                    id="body",
+                )
+            with TabPane("Files", id="files-tab"):
+                yield Horizontal(
+                    Tree[Path](Text(str(self.cwd)), id="files-tree"),
+                    VerticalScroll(Static(id="preview"), id="preview-scroll"),
+                    id="files-body",
+                )
 
     async def on_mount(self) -> None:
         await self.refresh_status()
+        self.refresh_files()
 
     async def action_refresh(self) -> None:
         await self.refresh_status()
+        self.refresh_files()
 
     async def action_toggle_file(self) -> None:
         focused = self.focused
@@ -203,6 +255,29 @@ class GitPaneApp(App[None]):
             unstaged_list.index = 0
             unstaged_list.focus()
 
+    def refresh_files(self) -> None:
+        """Reload the file tree rooted at the launch directory."""
+        self.preview_request_id += 1
+        tree = self.query_one("#files-tree", Tree)
+        tree.clear()
+        tree.root.set_label(Text(str(self.cwd)))
+        tree.root.expand()
+        nodes: dict[tuple[str, ...], TreeNode[Path]] = {(): tree.root}
+        for relative in git.files(self.cwd):
+            parts = Path(relative).parts
+            parent_parts: tuple[str, ...] = ()
+            for part in parts[:-1]:
+                branch_parts = (*parent_parts, part)
+                if branch_parts not in nodes:
+                    nodes[branch_parts] = nodes[parent_parts].add(Text(part))
+                parent_parts = branch_parts
+            nodes[parent_parts].add_leaf(Text(parts[-1]), self.cwd / relative)
+
+        preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
+        self.query_one("#preview", Static).update("")
+        preview_scroll.loading = False
+        preview_scroll.scroll_to(0, 0, animate=False)
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Start loading the diff for a selected file entry."""
         if not isinstance(event.item, FileItem):
@@ -234,6 +309,31 @@ class GitPaneApp(App[None]):
                 diff_scroll.scroll_to, 0, view.first_change, animate=False
             )
 
+    def on_tree_node_selected(self, event: Tree.NodeSelected[Path]) -> None:
+        """Start loading the selected file on a thread worker."""
+        path = event.node.data
+        if path is None:
+            return
+        self.preview_request_id += 1
+        preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
+        preview_scroll.loading = True
+        self.load_preview(path, self.preview_request_id)
+
+    @work(thread=True, exclusive=True, group="preview")
+    def load_preview(self, path: Path, token: int) -> None:
+        """Load a file preview on a thread worker."""
+        view = load_preview_view(path)
+        self.call_from_thread(self.apply_preview_view, view, token)
+
+    def apply_preview_view(self, view: PreviewView, token: int) -> None:
+        """Apply a preview only if it is still the newest request."""
+        if not is_current_request(token, self.preview_request_id):
+            return
+        self.query_one("#preview", Static).update(view.content)
+        preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
+        preview_scroll.loading = False
+        preview_scroll.scroll_to(0, 0, animate=False)
+
     async def on_file_item_toggle_requested(
         self, event: FileItem.ToggleRequested
     ) -> None:
@@ -246,7 +346,8 @@ class GitPaneApp(App[None]):
 
 def main() -> None:
     """Run GitPane for the current repository."""
-    GitPaneApp(git.repo_root()).run()
+    cwd = Path.cwd()
+    GitPaneApp(git.repo_root(cwd), cwd).run()
 
 
 if __name__ == "__main__":
