@@ -18,14 +18,18 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.scrollbar import ScrollBar, ScrollTo
 from textual.widgets import ListItem, ListView, Static, TabbedContent, TabPane, Tree
 from textual.widgets.tree import TreeNode
 
 from gitpane import diff, git, icons
 from gitpane.diff import Row
 from gitpane.model import Commit, CommitFile, FileEntry, Side
-from gitpane.widgets import HorizontalSplitter, VerticalSplitter
+from gitpane.widgets import CodeScroll, HorizontalSplitter, VerticalSplitter
+from gitpane.widgets import JumpScrollBar as _JumpScrollBar
+from gitpane.widgets import scrollbar_click_target as _scrollbar_click_target
+
+JumpScrollBar = _JumpScrollBar
+scrollbar_click_target = _scrollbar_click_target
 
 DiffEntry = FileEntry | CommitFile
 
@@ -143,16 +147,6 @@ def is_prefix_offset(offset: int) -> bool:
     return 0 <= offset <= 2
 
 
-def scrollbar_click_target(
-    y: float, height: int, virtual_size: int, window_size: int
-) -> float:
-    """Map a scrollbar track position to a centered document position."""
-    if height <= 0:
-        return 0
-    target = (y + 0.5) / height * virtual_size - window_size / 2
-    return max(0, min(target, virtual_size - window_size))
-
-
 def render_diff_rows(entry: DiffEntry, rows: list[Row]) -> tuple[Text, ...]:
     """Render parsed diff rows as independently displayable Rich text lines."""
     highlighted_lines = highlight_new_lines(entry, rows)
@@ -212,57 +206,6 @@ class FileItem(ListItem):
             self.post_message(self.ToggleRequested(self.entry))
             return
         self.post_message(self._ChildClicked(self))
-
-
-class JumpScrollBar(ScrollBar):
-    """A scrollbar that jumps to clicked track positions."""
-
-    def action_scroll_up(self) -> None:
-        """Ignore the default page-up track action."""
-
-    def action_scroll_down(self) -> None:
-        """Ignore the default page-down track action."""
-
-    async def _on_mouse_down(self, event: events.MouseDown) -> None:
-        if (
-            event.button == 1
-            and self.vertical
-            and event.style.meta.get("@mouse.down") != "grab"
-        ):
-            self.post_message(
-                ScrollTo(
-                    y=scrollbar_click_target(
-                        event.pointer_y,
-                        self.size.height,
-                        self.window_virtual_size,
-                        self.window_size,
-                    ),
-                    animate=False,
-                )
-            )
-        event.stop()
-
-
-class CodeScroll(VerticalScroll):
-    """Code viewer scrolling without animated paging."""
-
-    @property
-    def vertical_scrollbar(self) -> ScrollBar:
-        if self._vertical_scrollbar is None:
-            self._vertical_scrollbar = JumpScrollBar(
-                vertical=True,
-                name="vertical",
-                thickness=self.scrollbar_size_vertical,
-            )
-            self._vertical_scrollbar.display = False
-            self.app._start_widget(self, self._vertical_scrollbar)
-        return self._vertical_scrollbar
-
-    def action_page_up(self) -> None:
-        self.scroll_page_up(animate=False)
-
-    def action_page_down(self) -> None:
-        self.scroll_page_down(animate=False)
 
 
 class GitPaneApp(App[None]):

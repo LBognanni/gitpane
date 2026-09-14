@@ -9,10 +9,8 @@ from textual.widgets import Static, TabbedContent, Tree
 
 from gitpane.app import (
     MAX_PREVIEW_BYTES,
-    CodeScroll,
     DiffView,
     GitPaneApp,
-    JumpScrollBar,
     PreviewView,
     build_diff_view,
     format_commit_label,
@@ -26,11 +24,11 @@ from gitpane.app import (
     load_preview_view,
     reconstruct_new_source,
     render_diff_rows,
-    scrollbar_click_target,
     toggle_file,
 )
 from gitpane.diff import Row
 from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
+from gitpane.widgets import CodeScroll, JumpScrollBar, scrollbar_click_target
 
 
 @pytest.mark.parametrize(
