@@ -113,10 +113,6 @@ ListView:focus > ListItem.--highlight {
     scrollbar-color: $accent;
 }
 
-#files-tree:focus {
-    border: solid $focus;
-}
-
 #files-tree > .tree--cursor {
     background: $focused-selection;
     color: $text;
