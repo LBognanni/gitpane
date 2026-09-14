@@ -24,7 +24,7 @@ from textual.widgets.tree import TreeNode
 from gitpane import diff, git, icons
 from gitpane.diff import Row
 from gitpane.model import Commit, CommitFile, FileEntry, Side
-from gitpane.widgets import CodeScroll, HorizontalSplitter, VerticalSplitter
+from gitpane.widgets import CodeScroll, CodeView, HorizontalSplitter, VerticalSplitter
 from gitpane.widgets import JumpScrollBar as _JumpScrollBar
 from gitpane.widgets import scrollbar_click_target as _scrollbar_click_target
 
@@ -225,6 +225,7 @@ class GitPaneApp(App[None]):
         self.commit_files_request_id = 0
         self.preview_request_id = 0
         self.diff_wrapped = False
+        self.diff_view: DiffView | None = None
         self.preview_wrapped = False
 
     def compose(self) -> ComposeResult:
@@ -265,6 +266,7 @@ class GitPaneApp(App[None]):
                     VerticalSplitter(),
                     Vertical(
                         Static(id="diff-title", classes="viewer-title"),
+                        CodeView(id="diff-view"),
                         CodeScroll(Static(id="diff"), id="diff-scroll"),
                         id="diff-pane",
                     ),
@@ -306,10 +308,60 @@ class GitPaneApp(App[None]):
         active_tab = self.query_one("#main-tabs", TabbedContent).active
         if active_tab == "changes-tab":
             self.diff_wrapped = not self.diff_wrapped
-            self._set_wrapped("#diff", "#diff-scroll", self.diff_wrapped)
+            self._set_diff_wrapped(self.diff_wrapped)
         elif active_tab == "files-tab":
             self.preview_wrapped = not self.preview_wrapped
             self._set_wrapped("#preview", "#preview-scroll", self.preview_wrapped)
+
+    def _active_diff_widget(self) -> CodeView | CodeScroll:
+        """Return the visible diff viewer."""
+        if self.diff_wrapped:
+            return self.query_one("#diff-scroll", CodeScroll)
+        return self.query_one("#diff-view", CodeView)
+
+    def _set_diff_wrapped(self, wrapped: bool) -> None:
+        """Switch diff renderers while retaining relative vertical progress."""
+        source = (
+            self.query_one("#diff-view", CodeView)
+            if wrapped
+            else self.query_one("#diff-scroll", CodeScroll)
+        )
+        progress = source.scroll_y / source.max_scroll_y if source.max_scroll_y else 0
+        loading = source.loading
+        view = self.query_one("#diff-view", CodeView)
+        scroll = self.query_one("#diff-scroll", CodeScroll)
+        content = self.query_one("#diff", Static)
+
+        if wrapped:
+            if self.diff_view is not None:
+                content.update(join_diff_lines(self.diff_view.lines))
+            view.set_class(True, "wrapped")
+            scroll.set_class(True, "wrapped")
+            content.set_class(True, "wrapped")
+            scroll.scroll_to(0, 0, animate=False)
+            destination: CodeView | CodeScroll = scroll
+        else:
+            if self.diff_view is not None:
+                view.set_document(self.diff_view.lines)
+            else:
+                view.set_document(())
+            content.update("")
+            view.set_class(False, "wrapped")
+            scroll.set_class(False, "wrapped")
+            content.set_class(False, "wrapped")
+            destination = view
+
+        source.loading = False
+        destination.loading = loading
+        self.call_after_refresh(
+            self._restore_diff_scroll_progress, destination, progress
+        )
+
+    def _restore_diff_scroll_progress(
+        self, viewer: CodeView | CodeScroll, progress: float
+    ) -> None:
+        """Restore vertical progress after a diff renderer has laid out."""
+        viewer.scroll_to(None, progress * viewer.max_scroll_y, animate=False)
 
     def _set_wrapped(
         self, content_selector: str, scroll_selector: str, wrapped: bool
@@ -352,10 +404,7 @@ class GitPaneApp(App[None]):
         self.selection = None
         self.query_one("#branch-status", Static).update(f"Branch: {state.branch}")
         self.query_one("#diff-title", Static).update("")
-        self.query_one("#diff", Static).update("")
-        diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
-        diff_scroll.scroll_to(0, 0, animate=False)
-        diff_scroll.loading = False
+        self._clear_diff()
 
         if state.staged:
             staged_list.index = 0
@@ -422,7 +471,7 @@ class GitPaneApp(App[None]):
         self.selection = entry
         self.query_one("#diff-title", Static).update(entry.path)
         self.request_id += 1
-        self.query_one("#diff-scroll", VerticalScroll).loading = True
+        self._active_diff_widget().loading = True
         self.load_diff(entry, self.request_id)
 
     @work(thread=True, exclusive=True, group="diff")
@@ -436,14 +485,31 @@ class GitPaneApp(App[None]):
         if not is_current_request(token, self.request_id):
             return
 
-        self.query_one("#diff", Static).update(join_diff_lines(view.lines))
-        diff_scroll = self.query_one("#diff-scroll", VerticalScroll)
-        diff_scroll.loading = False
-        diff_scroll.scroll_to(0, 0, animate=False)
+        self.diff_view = view
+        viewer = self._active_diff_widget()
+        if self.diff_wrapped:
+            self.query_one("#diff", Static).update(join_diff_lines(view.lines))
+        else:
+            self.query_one("#diff-view", CodeView).set_document(view.lines)
+        self.query_one("#diff-view", CodeView).loading = False
+        self.query_one("#diff-scroll", CodeScroll).loading = False
+        viewer.scroll_to(0, 0, animate=False)
         if view.first_change is not None:
             self.call_after_refresh(
-                diff_scroll.scroll_to, 0, view.first_change, animate=False
+                viewer.scroll_to, 0, view.first_change, animate=False
             )
+
+    def _clear_diff(self) -> None:
+        """Clear both diff renderers and discard the accepted document."""
+        self.diff_view = None
+        view = self.query_one("#diff-view", CodeView)
+        scroll = self.query_one("#diff-scroll", CodeScroll)
+        view.set_document(())
+        self.query_one("#diff", Static).update("")
+        view.loading = False
+        scroll.loading = False
+        view.scroll_to(0, 0, animate=False)
+        scroll.scroll_to(0, 0, animate=False)
 
     def on_tree_node_selected(self, event: Tree.NodeSelected[object]) -> None:
         """Handle commit expansion, historical diffs, and file previews."""

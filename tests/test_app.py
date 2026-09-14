@@ -28,7 +28,7 @@ from gitpane.app import (
 )
 from gitpane.diff import Row
 from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
-from gitpane.widgets import CodeScroll, JumpScrollBar, scrollbar_click_target
+from gitpane.widgets import CodeScroll, CodeView, JumpScrollBar, scrollbar_click_target
 
 
 @pytest.mark.parametrize(
@@ -353,6 +353,367 @@ def test_wrap_toggle_applies_independently_to_each_viewer(
 
             assert app.preview_wrapped is False
             assert syntax.word_wrap is False
+
+    asyncio.run(exercise())
+
+
+def test_diff_uses_virtual_view_and_only_populates_static_when_wrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            virtual = app.query_one("#diff-view", CodeView)
+            fallback = app.query_one("#diff", Static)
+            assert str(fallback.content) == ""
+
+            lines: tuple[Text, ...] = tuple(
+                Text(f"line {index}") for index in range(40)
+            )
+            scroll_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+            original_scroll_to = virtual.scroll_to
+
+            def scroll_to(*args: object, **kwargs: object) -> None:
+                scroll_calls.append((args, kwargs))
+                original_scroll_to(*args, **kwargs)
+
+            monkeypatch.setattr(virtual, "scroll_to", scroll_to)
+            app.apply_diff_view(DiffView(lines, 0), app.request_id)
+            await pilot.pause()
+
+            assert virtual.lines == lines
+            assert virtual.scroll_offset == (0, 0)
+            assert scroll_calls == [
+                ((0, 0), {"animate": False}),
+                ((0, 0), {"animate": False}),
+                ((0, 0), {"animate": False}),
+            ]
+            assert str(fallback.content) == ""
+
+            await pilot.press("w")
+            await pilot.pause()
+            content = fallback.content
+            assert isinstance(content, Text)
+            assert content.plain == "\n".join(f"line {index}" for index in range(40))
+
+            app.apply_diff_view(DiffView((Text("replacement"),), 0), app.request_id)
+            content = fallback.content
+            assert isinstance(content, Text)
+            assert content.plain == "replacement"
+
+            await pilot.press("w")
+            await pilot.pause()
+            assert virtual.lines == (Text("replacement"),)
+            assert str(fallback.content) == ""
+
+    asyncio.run(exercise())
+
+
+def test_diff_first_change_scrolls_past_leading_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            view = app.query_one("#diff-view", CodeView)
+            lines = tuple(Text(f"line {index}") for index in range(80))
+
+            app.apply_diff_view(DiffView(lines, 17), app.request_id)
+            await pilot.pause()
+
+            assert view.scroll_offset == (0, 17)
+
+    asyncio.run(exercise())
+
+
+def test_diff_view_supports_line_page_jump_and_long_horizontal_navigation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            view = app.query_one("#diff-view", CodeView)
+            lines = tuple(Text(f"{row:03} " + "x" * 200) for row in range(100))
+            app.apply_diff_view(DiffView(lines, None), app.request_id)
+            await pilot.pause()
+            view.focus()
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert view.scroll_y == 1
+
+            page_height = view.scrollable_content_region.height
+            await pilot.press("pagedown")
+            await pilot.pause()
+            assert view.scroll_y == 1 + page_height
+
+            scrollbar = view.vertical_scrollbar
+            assert await pilot.click(scrollbar, offset=(0, scrollbar.size.height - 1))
+            await pilot.pause()
+            assert view.scroll_y == view.max_scroll_y
+
+            await pilot.press(*("right",) * 300)
+            await pilot.pause()
+            assert view.scroll_x == view.max_scroll_x
+
+    asyncio.run(exercise())
+
+
+def test_diff_request_and_refresh_clear_both_renderers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = FileEntry("example.py", Side.UNSTAGED, "M")
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    monkeypatch.setattr(GitPaneApp, "load_diff", lambda *_: None)
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            view = app.query_one("#diff-view", CodeView)
+            scroll = app.query_one("#diff-scroll", CodeScroll)
+            content = app.query_one("#diff", Static)
+            lines = tuple(Text(f"{row:03} " + "x" * 120) for row in range(80))
+
+            assert view.display is True
+            assert scroll.display is False
+            app.request_diff(entry)
+            assert view.loading is True
+            assert scroll.loading is False
+
+            app.apply_diff_view(DiffView(lines, 17), app.request_id)
+            await pilot.pause()
+            assert app.diff_view == DiffView(lines, 17)
+            assert view.lines == lines
+            assert view.scroll_offset == (0, 17)
+            assert str(content.content) == ""
+            assert view.loading is False
+            assert scroll.loading is False
+
+            await pilot.press("w")
+            await pilot.pause()
+            assert view.display is False
+            assert scroll.display is True
+            assert content.content == join_diff_lines(lines)
+            scroll.scroll_to(0, 20, animate=False)
+            app.request_diff(entry)
+            assert view.loading is False
+            assert scroll.loading is True
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert app.diff_view is None
+            assert view.lines == ()
+            assert str(content.content) == ""
+            assert view.scroll_offset == (0, 0)
+            assert scroll.scroll_offset == (0, 0)
+            assert view.loading is False
+            assert scroll.loading is False
+
+            await pilot.press("w")
+            await pilot.pause()
+            assert view.display is True
+            assert scroll.display is False
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("lines", "first_change"),
+    [
+        ((), None),
+        (tuple(Text(f"context {index}") for index in range(80)), None),
+    ],
+)
+def test_empty_and_context_only_diffs_stay_at_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lines: tuple[Text, ...],
+    first_change: int | None,
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            view = app.query_one("#diff-view", CodeView)
+            view.set_document(tuple(Text("x" * 120) for _ in range(80)))
+            view.scroll_to(20, 20, animate=False)
+            await pilot.pause()
+
+            app.apply_diff_view(DiffView(lines, first_change), app.request_id)
+            await pilot.pause()
+
+            assert view.scroll_offset == (0, 0)
+
+    asyncio.run(exercise())
+
+
+def test_replacing_a_scrolled_diff_resets_offsets_and_scrolls_to_first_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            view = app.query_one("#diff-view", CodeView)
+            app.apply_diff_view(
+                DiffView(tuple(Text("old " + "x" * 120) for _ in range(80)), 0),
+                app.request_id,
+            )
+            await pilot.pause()
+            view.scroll_to(20, 30, animate=False)
+            await pilot.pause()
+
+            replacement = tuple(Text(f"new {index}") for index in range(80))
+            generation = view.document_generation
+            app.apply_diff_view(DiffView(replacement, 9), app.request_id)
+            await pilot.pause()
+
+            assert view.lines == replacement
+            assert view.document_generation == generation + 1
+            assert view.scroll_offset == (0, 9)
+
+    asyncio.run(exercise())
+
+
+def test_diff_wrap_transitions_preserve_progress_and_reset_horizontal_scroll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            view = app.query_one("#diff-view", CodeView)
+            fallback = app.query_one("#diff-scroll", CodeScroll)
+            lines = tuple(Text(f"{index:03} " + "x" * 120) for index in range(100))
+            app.apply_diff_view(DiffView(lines, None), app.request_id)
+            await pilot.pause()
+            view.scroll_to(20, 30, animate=False)
+            await pilot.pause()
+            unwrapped_progress = view.scroll_y / view.max_scroll_y
+
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert fallback.scroll_x == 0
+            assert fallback.scroll_y / fallback.max_scroll_y == pytest.approx(
+                unwrapped_progress, abs=1 / fallback.max_scroll_y
+            )
+
+            fallback.scroll_to(0, fallback.max_scroll_y / 2, animate=False)
+            await pilot.pause()
+            wrapped_progress = fallback.scroll_y / fallback.max_scroll_y
+
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert view.scroll_x == 0
+            assert view.scroll_y / view.max_scroll_y == pytest.approx(
+                wrapped_progress, abs=1 / view.max_scroll_y
+            )
+
+    asyncio.run(exercise())
+
+
+def test_loading_a_new_diff_while_wrapped_updates_only_the_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await pilot.press("w")
+            await pilot.pause()
+            fallback = app.query_one("#diff-scroll", CodeScroll)
+            virtual = app.query_one("#diff-view", CodeView)
+            fallback.loading = True
+            lines = tuple(Text(f"new {index}") for index in range(40))
+            scroll_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+            original_scroll_to = fallback.scroll_to
+
+            def scroll_to(*args: object, **kwargs: object) -> None:
+                scroll_calls.append((args, kwargs))
+                original_scroll_to(*args, **kwargs)
+
+            monkeypatch.setattr(fallback, "scroll_to", scroll_to)
+
+            app.apply_diff_view(DiffView(lines, 17), app.request_id)
+            await pilot.pause()
+
+            content = app.query_one("#diff", Static).content
+            assert isinstance(content, Text)
+            assert content.plain == "\n".join(f"new {index}" for index in range(40))
+            assert scroll_calls == [
+                ((0, 0), {"animate": False}),
+                ((0, 17), {"animate": False}),
+            ]
+            assert fallback.loading is False
+            assert virtual.lines == ()
+
+    asyncio.run(exercise())
+
+
+def test_stale_diff_application_preserves_newer_virtual_document_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            app.request_id += 1
+            current = app.request_id
+            newer = DiffView(
+                tuple(Text(f"new {index} " + "x" * 120) for index in range(100)), 20
+            )
+            app.apply_diff_view(newer, current)
+            await pilot.pause()
+            virtual = app.query_one("#diff-view", CodeView)
+            virtual.scroll_to(20, 30, animate=False)
+            await pilot.pause()
+            await pilot.press("w")
+            await pilot.pause()
+            fallback = app.query_one("#diff-scroll", CodeScroll)
+            fallback.scroll_to(0, 10, animate=False)
+            fallback.loading = True
+            state = (
+                app.diff_view,
+                virtual.lines,
+                virtual.document_generation,
+                virtual.scroll_offset,
+                app.query_one("#diff", Static).content,
+                fallback.scroll_offset,
+            )
+
+            app.apply_diff_view(DiffView((Text("old"),), 0), current - 1)
+
+            assert (
+                app.diff_view,
+                virtual.lines,
+                virtual.document_generation,
+                virtual.scroll_offset,
+                app.query_one("#diff", Static).content,
+                fallback.scroll_offset,
+            ) == state
+            assert fallback.loading is True
 
     asyncio.run(exercise())
 

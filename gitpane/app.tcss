@@ -133,8 +133,17 @@ ListView:focus > ListItem.--highlight {
     text-style: bold;
 }
 
+#diff-view {
+    height: 1fr;
+    overflow: scroll scroll;
+    background: $diff-background;
+    color: $text;
+    scrollbar-color: $accent;
+}
+
 #diff-scroll {
     height: 1fr;
+    display: none;
     overflow: scroll scroll;
     background: $diff-background;
     color: $text;
@@ -148,9 +157,17 @@ ListView:focus > ListItem.--highlight {
     color: $text;
 }
 
-#diff-scroll.wrapped,
+#diff-scroll.wrapped {
+    display: block;
+    overflow-x: hidden;
+}
+
 #preview-scroll.wrapped {
     overflow-x: hidden;
+}
+
+#diff-view.wrapped {
+    display: none;
 }
 
 #diff.wrapped,
