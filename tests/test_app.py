@@ -5,12 +5,14 @@ import pytest
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
-from textual.widgets import Tree
+from textual.widgets import TabbedContent, Tree
 
 from gitpane.app import (
     MAX_PREVIEW_BYTES,
+    CodeScroll,
     DiffView,
     GitPaneApp,
+    JumpScrollBar,
     PreviewView,
     build_diff_view,
     format_file_label,
@@ -22,6 +24,7 @@ from gitpane.app import (
     load_preview_view,
     reconstruct_new_source,
     render_diff_rows,
+    scrollbar_click_target,
     toggle_file,
 )
 from gitpane.diff import Row
@@ -193,6 +196,148 @@ def test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views(
         ("status", root),
         ("files", cwd),
     ]
+
+
+def test_wrap_toggle_applies_independently_to_each_viewer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
+    )
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert app.diff_wrapped is True
+            assert app.preview_wrapped is False
+            assert app.query_one("#diff").has_class("wrapped")
+            assert app.query_one("#diff-scroll").has_class("wrapped")
+
+            app.query_one("#main-tabs", TabbedContent).active = "files-tab"
+            syntax = Syntax("value = 'a long line'", "python", word_wrap=False)
+            app.apply_preview_view(PreviewView(syntax), app.preview_request_id)
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert app.diff_wrapped is True
+            assert app.preview_wrapped is True
+            assert app.query_one("#preview").has_class("wrapped")
+            assert app.query_one("#preview-scroll").has_class("wrapped")
+            assert syntax.word_wrap is True
+
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert app.preview_wrapped is False
+            assert syntax.word_wrap is False
+
+    asyncio.run(exercise())
+
+
+def test_loaded_preview_uses_current_wrap_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
+    )
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            app.query_one("#main-tabs", TabbedContent).active = "files-tab"
+            await pilot.press("w")
+            await pilot.pause()
+
+            syntax = Syntax("value = 1", "python", word_wrap=False)
+            app.apply_preview_view(PreviewView(syntax), app.preview_request_id)
+
+            assert syntax.word_wrap is True
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("y", "expected"),
+    [
+        (0, 0),
+        (10, 475),
+        (19, 900),
+    ],
+)
+def test_scrollbar_click_target_centers_and_clamps(y: float, expected: float) -> None:
+    assert scrollbar_click_target(y, 20, 1000, 100) == expected
+
+
+def test_code_viewers_use_jump_scrollbar_and_unanimated_paging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
+    )
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test():
+            scroll = app.query_one("#preview-scroll", CodeScroll)
+            calls: list[tuple[str, bool]] = []
+            monkeypatch.setattr(
+                scroll,
+                "scroll_page_up",
+                lambda *, animate: calls.append(("up", animate)),
+            )
+            monkeypatch.setattr(
+                scroll,
+                "scroll_page_down",
+                lambda *, animate: calls.append(("down", animate)),
+            )
+
+            scroll.action_page_up()
+            scroll.action_page_down()
+
+            assert calls == [("up", False), ("down", False)]
+            assert isinstance(scroll.vertical_scrollbar, JumpScrollBar)
+            assert isinstance(app.query_one("#diff-scroll"), CodeScroll)
+
+    asyncio.run(exercise())
+
+
+def test_file_preview_scrollbar_track_click_jumps_to_clicked_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "gitpane.app.git.status", lambda root: RepoState(root, [], [])
+    )
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            app.query_one("#main-tabs", TabbedContent).active = "files-tab"
+            app.query_one("#preview").update(Text("\n".join(map(str, range(1000)))))
+            await pilot.pause()
+
+            scroll = app.query_one("#preview-scroll", CodeScroll)
+            scrollbar = scroll.vertical_scrollbar
+            click_y = scrollbar.size.height * 3 // 4
+            expected = scrollbar_click_target(
+                click_y,
+                scrollbar.size.height,
+                scrollbar.window_virtual_size,
+                scrollbar.window_size,
+            )
+
+            assert await pilot.click(scrollbar, offset=(0, click_y))
+            await pilot.pause()
+
+            assert scroll.scroll_y == pytest.approx(expected)
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(

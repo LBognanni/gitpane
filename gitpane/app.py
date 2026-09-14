@@ -13,6 +13,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
+from textual.scrollbar import ScrollBar, ScrollTo
 from textual.widgets import ListItem, ListView, Static, TabbedContent, TabPane, Tree
 from textual.widgets.tree import TreeNode
 
@@ -126,6 +127,16 @@ def is_prefix_offset(offset: int) -> bool:
     return 0 <= offset <= 2
 
 
+def scrollbar_click_target(
+    y: float, height: int, virtual_size: int, window_size: int
+) -> float:
+    """Map a scrollbar track position to a centered document position."""
+    if height <= 0:
+        return 0
+    target = (y + 0.5) / height * virtual_size - window_size / 2
+    return max(0, min(target, virtual_size - window_size))
+
+
 def render_diff_rows(entry: FileEntry, rows: list[Row]) -> Text:
     """Render parsed diff rows as one plain Rich text value."""
     text = Text()
@@ -178,11 +189,63 @@ class FileItem(ListItem):
         self.post_message(self._ChildClicked(self))
 
 
+class JumpScrollBar(ScrollBar):
+    """A scrollbar that jumps to clicked track positions."""
+
+    def action_scroll_up(self) -> None:
+        """Ignore the default page-up track action."""
+
+    def action_scroll_down(self) -> None:
+        """Ignore the default page-down track action."""
+
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        if (
+            event.button == 1
+            and self.vertical
+            and event.style.meta.get("@mouse.down") != "grab"
+        ):
+            self.post_message(
+                ScrollTo(
+                    y=scrollbar_click_target(
+                        event.pointer_y,
+                        self.size.height,
+                        self.window_virtual_size,
+                        self.window_size,
+                    ),
+                    animate=False,
+                )
+            )
+        event.stop()
+
+
+class CodeScroll(VerticalScroll):
+    """Code viewer scrolling without animated paging."""
+
+    @property
+    def vertical_scrollbar(self) -> ScrollBar:
+        if self._vertical_scrollbar is None:
+            self._vertical_scrollbar = JumpScrollBar(
+                vertical=True,
+                name="vertical",
+                thickness=self.scrollbar_size_vertical,
+            )
+            self._vertical_scrollbar.display = False
+            self.app._start_widget(self, self._vertical_scrollbar)
+        return self._vertical_scrollbar
+
+    def action_page_up(self) -> None:
+        self.scroll_page_up(animate=False)
+
+    def action_page_down(self) -> None:
+        self.scroll_page_down(animate=False)
+
+
 class GitPaneApp(App[None]):
     CSS_PATH = "app.tcss"
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("r", "refresh", "Refresh"),
         Binding("space", "toggle_file", "Toggle"),
+        Binding("w", "toggle_wrap", "Wrap"),
     ]
 
     def __init__(self, root: Path, cwd: Path | None = None) -> None:
@@ -192,6 +255,8 @@ class GitPaneApp(App[None]):
         self.selection: tuple[str, Side] | None = None
         self.request_id = 0
         self.preview_request_id = 0
+        self.diff_wrapped = False
+        self.preview_wrapped = False
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id="main-tabs"):
@@ -204,13 +269,13 @@ class GitPaneApp(App[None]):
                         ListView(id="unstaged-list"),
                         id="sidebar",
                     ),
-                    VerticalScroll(Static(id="diff"), id="diff-scroll"),
+                    CodeScroll(Static(id="diff"), id="diff-scroll"),
                     id="body",
                 )
             with TabPane("Files", id="files-tab"):
                 yield Horizontal(
                     Tree[Path](Text(str(self.cwd)), id="files-tree"),
-                    VerticalScroll(Static(id="preview"), id="preview-scroll"),
+                    CodeScroll(Static(id="preview"), id="preview-scroll"),
                     id="files-body",
                 )
 
@@ -230,6 +295,43 @@ class GitPaneApp(App[None]):
         if not isinstance(item, FileItem):
             return
         await self.toggle_entry(item.entry)
+
+    def action_toggle_wrap(self) -> None:
+        """Toggle wrapping in the viewer on the active tab."""
+        active_tab = self.query_one("#main-tabs", TabbedContent).active
+        if active_tab == "changes-tab":
+            self.diff_wrapped = not self.diff_wrapped
+            self._set_wrapped("#diff", "#diff-scroll", self.diff_wrapped)
+        elif active_tab == "files-tab":
+            self.preview_wrapped = not self.preview_wrapped
+            self._set_wrapped("#preview", "#preview-scroll", self.preview_wrapped)
+
+    def _set_wrapped(
+        self, content_selector: str, scroll_selector: str, wrapped: bool
+    ) -> None:
+        content = self.query_one(content_selector, Static)
+        scroll = self.query_one(scroll_selector, VerticalScroll)
+        progress = scroll.scroll_y / scroll.max_scroll_y if scroll.max_scroll_y else 0
+
+        content.set_class(wrapped, "wrapped")
+        scroll.set_class(wrapped, "wrapped")
+        if isinstance(content.content, Syntax):
+            content.content.word_wrap = wrapped
+            content.update(content.content)
+
+        self.call_after_refresh(
+            self._restore_scroll_progress, scroll, progress, wrapped
+        )
+
+    def _restore_scroll_progress(
+        self, scroll: VerticalScroll, progress: float, wrapped: bool
+    ) -> None:
+        """Restore the relative vertical position after content reflows."""
+        scroll.scroll_to(
+            0 if wrapped else None,
+            progress * scroll.max_scroll_y,
+            animate=False,
+        )
 
     async def refresh_status(self) -> None:
         self.request_id += 1
@@ -329,6 +431,8 @@ class GitPaneApp(App[None]):
         """Apply a preview only if it is still the newest request."""
         if not is_current_request(token, self.preview_request_id):
             return
+        if isinstance(view.content, Syntax):
+            view.content.word_wrap = self.preview_wrapped
         self.query_one("#preview", Static).update(view.content)
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
         preview_scroll.loading = False

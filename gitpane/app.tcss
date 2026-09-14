@@ -98,6 +98,17 @@ ListView:focus > ListItem.--highlight {
     color: $text;
 }
 
+#diff-scroll.wrapped,
+#preview-scroll.wrapped {
+    overflow-x: hidden;
+}
+
+#diff.wrapped,
+#preview.wrapped {
+    width: 100%;
+    text-wrap: wrap;
+}
+
 #files-body {
     height: 1fr;
     background: $canvas;
