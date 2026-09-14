@@ -1,9 +1,12 @@
 import functools
+import os
 import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
+
+os.environ.setdefault("TEXTUAL_SMOOTH_SCROLL", "0")
 
 from rich.style import Style
 from rich.syntax import Syntax
