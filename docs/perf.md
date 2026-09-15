@@ -30,9 +30,9 @@ A synthetic Textual `run_test` benchmark using 20,000 lines of approximately
 | Textual `RichLog` | approximately 0.94 seconds |
 | Minimal virtual `ScrollView` prototype | approximately 0.06 seconds |
 
-In a separate synthetic test, `render_diff_rows` took approximately 5.4 seconds
-to prepare 50,000 highlighted Python rows and generated roughly 400,000 Rich
-style spans.
+In a separate historical synthetic test, `render_diff_rows` took approximately
+5.4 seconds to prepare 50,000 highlighted Python rows and generated roughly
+400,000 Rich style spans.
 
 These numbers are directional rather than performance contracts. The benchmark
 was synthetic, `run_test` adds overhead, and results depend on the machine,
@@ -151,9 +151,9 @@ not part of the initial performance work.
 
 ## Measurement strategy
 
-Add a repeatable benchmark or profiling harness for 1,000, 10,000, and 50,000
-line documents. Include ordinary source, dense syntax styles, additions and
-removals, long lines, and both diff and preview content.
+Add a repeatable benchmark or profiling harness for 1,000 and 10,000 line
+documents. Include ordinary source, focused dense syntax styles and long lines,
+additions and removals, and both diff and preview content.
 
 Record at least:
 

@@ -378,7 +378,7 @@ def test_diff_uses_virtual_view_and_only_populates_static_when_wrapped(
 
             def scroll_to(*args: object, **kwargs: object) -> None:
                 scroll_calls.append((args, kwargs))
-                original_scroll_to(*args, **kwargs)
+                original_scroll_to(*args, **kwargs)  # type: ignore[arg-type]
 
             monkeypatch.setattr(virtual, "scroll_to", scroll_to)
             app.apply_diff_view(DiffView(lines, 0), app.request_id)
@@ -650,7 +650,7 @@ def test_loading_a_new_diff_while_wrapped_updates_only_the_fallback(
 
             def scroll_to(*args: object, **kwargs: object) -> None:
                 scroll_calls.append((args, kwargs))
-                original_scroll_to(*args, **kwargs)
+                original_scroll_to(*args, **kwargs)  # type: ignore[arg-type]
 
             monkeypatch.setattr(fallback, "scroll_to", scroll_to)
 

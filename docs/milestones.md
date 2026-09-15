@@ -3,6 +3,10 @@
 The completed implementation milestones have been removed. This roadmap covers
 the large-file performance work described in `docs/perf.md`.
 
+> The benchmark harness, reports, and performance pytest suite were removed by
+> product decision. Milestone 1 and Milestone 2 benchmark/comparison stories
+> below are retained only as historical planning context.
+
 # Milestone 1: Performance baseline
 
 ## Goal
@@ -14,11 +18,11 @@ and the results identify where time and memory are spent.
 
 ## Tasks
 
-1. Add a benchmark or profiling harness for 1,000, 10,000, and 50,000 lines.
+1. Add a benchmark or profiling harness for 1,000 and 10,000 lines.
 2. Cover normal source, densely highlighted source, mixed diff rows, long lines,
    vertical paging, scrollbar jumps, horizontal scrolling, resize, and wrapping.
 3. Measure diff parsing, syntax highlighting, view construction, first render,
-   repeated scrolling, wrap toggling, and retained cache memory separately.
+   repeated scrolling, wrap toggling, and active-document allocations separately.
 4. Record the environment and baseline results so later milestones can be
    compared against the same workload.
 5. Register a `performance` pytest marker and apply it to every benchmark,
@@ -59,9 +63,9 @@ and the results identify where time and memory are spent.
 - Keep generated inputs deterministic and seed-free. Use the same workload IDs,
   dimensions, operation sequence, and report schema in later milestones.
 - The benchmark matrix is intentionally not a Cartesian product. The ordinary
-  preview and mixed-diff cases cover all 1,000, 10,000, and 50,000 line sizes;
-  focused dense-highlight and long-line cases cover the documented worst cases
-  without multiplying an already expensive suite.
+  preview and mixed-diff cases cover 1,000 and 10,000 lines; focused 1,000-line
+  dense-highlight and long-line cases cover the documented worst cases without
+  multiplying an already expensive suite.
 - `uv run pytest -m performance` is the one root-level benchmark command. It
   writes the raw, machine-specific report to
   `.artifacts/performance-baseline.json`; `.artifacts/` is ignored. The reviewed
@@ -81,22 +85,22 @@ truth for these IDs and dimensions:
 
 | Workload ID | Sizes | Required shape and purpose |
 | --- | --- | --- |
-| `preview-normal` | 1k, 10k, 50k | Short numbered Python assignment lines; remains below the 1 MiB preview limit and measures representative source. |
-| `preview-dense` | 1k, 10k | Compact Python containing strings, numbers, calls, and punctuation on every line to produce dense syntax spans. |
+| `preview-normal` | 1k, 10k | Short numbered Python assignment lines; remains below the 1 MiB preview limit and measures representative source. |
+| `preview-dense` | 1k | Compact Python containing strings, numbers, calls, and punctuation on every line to produce dense syntax spans. |
 | `preview-long` | 1k | Mostly ordinary rows with deterministic 4,096-column rows; isolates horizontal width and long-line behavior without an excessive fixture. |
-| `diff-mixed` | 1k, 10k, 50k | One valid unified patch with repeating context/remove/add groups and changes away from row zero. |
-| `diff-dense` | 1k, 10k | The mixed shape with compact, syntax-dense Python on the new side. |
+| `diff-mixed` | 1k, 10k | One valid unified patch with repeating context/remove/add groups and changes away from row zero. |
+| `diff-dense` | 1k | The mixed shape with compact, syntax-dense Python on the new side. |
 | `diff-long` | 1k | The mixed shape with deterministic 4,096-column changed and context rows. |
 
-“1k”, “10k”, and “50k” mean exactly 1,000, 10,000, and 50,000 source rows for
-previews and exactly that many parsed `Row` values for diffs. Patch headers and
-change pairing must be generated so `diff.parse()` returns the requested row
-count. Every generator exposes metadata (ID, viewer, line count, maximum source
-width, content byte count, and expected diff-kind counts) used in the report.
+“1k” and “10k” mean exactly 1,000 and 10,000 source rows for previews and
+exactly that many parsed `Row` values for diffs. Patch headers and change pairing
+must be generated so `diff.parse()` returns the requested row count. Every
+generator exposes metadata (ID, viewer, line count, maximum source width,
+content byte count, and expected diff-kind counts) used in the report.
 
 Preparation measurements run every workload above. Headless viewer measurements
-run `preview-normal` and `diff-mixed` at all three sizes, plus the 1k dense and
-long variants. For each viewer/workload combination report first render; ten
+run `preview-normal` and `diff-mixed` at both sizes, plus the 1k dense and long
+variants. For each viewer/workload combination report first render; ten
 settled line scrolls; ten settled page scrolls; five settled scrollbar jumps;
 five horizontal scrolls where content is wider than the viewport; resize from
 120x40 to 100x30 and back; and wrap on/off. Report the complete sequence total
@@ -132,7 +136,7 @@ later measurements consume stable, validated synthetic content.
 3. Build syntactically valid unified patches directly. Use a tiny requested row
    count in normal tests to prove exact parsed count, kind distribution,
    deterministic output, first change placement, width metadata, and special
-   dense/long characteristics. Do not generate 10k/50k content in the normal
+   dense/long characteristics. Do not generate 10k content in the normal
    suite.
 4. Add a marker-selection sentinel in
    `tests/performance/test_selection.py`, with module-level
@@ -158,8 +162,8 @@ the fast contract tests prove deterministic shape without timing assertions.
 ### M1-S2 — Add report collection and preparation/memory measurements
 
 **Outcome:** one isolated pytest run produces structured environment, parsing,
-highlighting, construction, end-to-end preparation, and retained-memory data,
-with diff and preview records kept separate.
+highlighting, construction, end-to-end preparation, and active-document
+allocation data, with diff and preview records kept separate.
 
 **Target paths**
 
@@ -185,7 +189,7 @@ with diff and preview records kept separate.
    Environment metadata collection may run read-only Git commands; timed
    workloads must not invoke Git.
 2. Take at least three samples for 1k preparation cases and one sample for 10k
-   and 50k cases. Clear `build_diff_view` between samples and call `gc.collect()`
+   cases. Clear `build_diff_view` between samples and call `gc.collect()`
    outside timed regions. Preserve raw samples so aggregation choices can be
    revisited.
 3. Diff phases are: `parse` (`diff.parse`), `highlight`
@@ -197,13 +201,12 @@ with diff and preview records kept separate.
    explicit Rich syntax highlighting of its `Syntax` content, lightweight view
    construction, and their documented total. Use `tmp_path` only for the bounded
    input read; do not include temporary-file creation in a timed region.
-5. Use `tracemalloc` deltas/peaks after a collection boundary for (a) one active
-   prepared diff, (b) one active prepared preview, and (c) the four-entry
-   `build_diff_view` cache filled with distinct 50k mixed patches. Include
-   `cache_info()` counts and label these as Python allocations, not process RSS.
+5. Use `tracemalloc` deltas/peaks after a collection boundary for one active
+   prepared diff and one active prepared preview. Label these as Python
+   allocations, not process RSS.
 6. Assertions are structural only: expected records exist, parsed row counts and
-   viewer types are correct, all samples are non-negative, and the cache contains
-   four entries. Never fail on elapsed time or allocated-byte magnitude.
+   viewer types are correct, and all samples are non-negative. Never fail on
+   elapsed time or allocated-byte magnitude.
 
 **Dependencies:** M1-S1 workload IDs and marker registration.
 
@@ -219,7 +222,8 @@ uv run mypy tests/performance tests/test_performance_reporting.py
 ```
 
 Expected artifact: `.artifacts/performance-baseline.json` validates as JSON and
-contains separate diff/preview preparation records and all three memory scopes.
+contains separate diff/preview preparation records and both active-document
+allocation records.
 
 ### M1-S3 — Measure current `Static` rendering and viewer interactions
 
@@ -300,7 +304,7 @@ performance contracts.
    threshold.
 2. Keep diff and preview tables separate. Within each, separate parse/read,
    highlighting, view construction, first render, each interaction, wrapping,
-   resize, active-document memory, and cache memory.
+   resize, and active-document allocations.
 3. State limitations: `run_test` is headless, timings are machine-dependent,
    `tracemalloc` excludes native/process allocations, the preview loader retains
    its 1 MiB limit, and focused dense/long cases are not run at every size.
@@ -378,7 +382,7 @@ The current diff appearance and navigation behavior must remain intact.
 
 - Unwrapped diff painting does not render every document row on each viewport
   update.
-- A 50,000-line prepared diff can be navigated without constructing one
+- A 10,000-line prepared diff can be navigated without constructing one
   document-sized `Static` renderable.
 - Diff text, gutters, row backgrounds, syntax styles, and first-change position
   match current behavior.
@@ -414,7 +418,7 @@ The current diff appearance and navigation behavior must remain intact.
   entering wrapped mode hides horizontal overflow and resets horizontal offset
   to zero, both wrap transitions restore relative vertical progress, and a diff
   loaded while wrapping is enabled is shown wrapped. Build the joined wrapped
-  `Text` lazily; an unwrapped 50,000-row diff must never construct it.
+  `Text` lazily; an unwrapped 10,000-row diff must never construct it.
 - Applying a current diff replaces the document atomically, resets both offsets,
   then scrolls to `first_change` after dimensions are current. Index zero is a
   valid first change. Empty/context-only documents remain at the origin.
@@ -433,7 +437,7 @@ The current diff appearance and navigation behavior must remain intact.
   joined document renderable but must not introduce a global memory manager.
 - Preserve workload IDs, operation counts, terminal size, and report schema from
   Milestone 1. Performance remains report-only in pytest. For milestone review,
-  “material improvement” means the same-environment 50k `diff-mixed`
+  “material improvement” means the same-environment 10k `diff-mixed`
   first-render result is at least 2x faster than the M1 `Static` result, and “no
   small-diff regression” means the 1k `diff-mixed` first-render result is no more
   than 20% slower. Treat these as a human review gate, not a CI timing assertion;
@@ -448,7 +452,7 @@ The current diff appearance and navigation behavior must remain intact.
 | Acceptance criterion | Owning stories | Proof |
 | --- | --- | --- |
 | Viewport updates do not render every unwrapped row | M2-S2, M2-S3 | Instrumented `render_line()` headless tests request only visible/cropped rows; app composition uses the viewer directly. |
-| A prepared 50k diff has no document-sized `Static` renderable in unwrapped mode | M2-S1, M2-S3, M2-S4 | Prepared output is per-line, the default app path never joins it, and the 50k harness exercises the production virtual viewer. |
+| A prepared 10k diff has no document-sized `Static` renderable in unwrapped mode | M2-S1, M2-S3, M2-S4 | Prepared output is per-line, the default app path never joins it, and the 10k harness exercises the production virtual viewer. |
 | Text, gutters, backgrounds, syntax styles, and first-change position match | M2-S1, M2-S3 | Stable row-style unit tests plus app-level initial-position tests, including first change zero. |
 | Line/page/jump/horizontal behavior is unanimated and bounded | M2-S2, M2-S3 | Viewer action, scrollbar, long-line cropping, and app integration tests. |
 | Wrapping retains current behavior without expanding M2 scope | M2-S3 | Hybrid virtual-unwrapped / lazy-`Static`-wrapped tests cover both transitions, progress, horizontal reset, and load-while-wrapped. |
@@ -472,7 +476,7 @@ existing `Static` display remains functional until integration is changed.
   formatting/style contracts.
 - Modify `tests/performance/test_preparation.py` to measure the same
   `view-construction` phase against per-line construction while retaining the M1
-  workload IDs, phase name, samples, and memory scopes.
+  workload IDs, phase name, samples, and active-document allocation records.
 
 **Implementation guidance**
 
@@ -634,7 +638,7 @@ applications are state-preserving no-ops.
 ### M2-S4 — Benchmark the production virtual diff path
 
 **Outcome:** the M1 harness measures the new diff viewer with the exact existing
-matrix and demonstrates viewport-scaled work and reviewable 1k/50k comparison
+matrix and demonstrates viewport-scaled work and reviewable 1k/10k comparison
 data while previews continue to measure their unchanged `Static` path.
 
 **Target paths**
@@ -664,7 +668,7 @@ data while previews continue to measure their unchanged `Static` path.
    and all structural bounds assertions. For diff wrap measurements, exercise
    the production lazy fallback transition rather than pretending `CodeView`
    supports wrapping.
-4. Add a stable assertion/counter showing the 50k unwrapped first frame and each
+4. Add a stable assertion/counter showing the 10k unwrapped first frame and each
    scroll render only a viewport-sized set of rows. Never assert elapsed time in
    pytest.
 5. Run the full performance command on an idle machine matching the M1
@@ -720,7 +724,7 @@ rewriting the original baseline.
    public imports used by tests unless all callers are updated in scope.
 2. Generate the final raw report from the exact revision being documented on an
    idle M1-compatible machine. Copy integer min/median/max values; report ratios
-   for 1k and 50k `diff-mixed` first render and the individual diff scroll
+   for 1k and 10k `diff-mixed` first render and the individual diff scroll
    operations. Do not hide preparation/highlighting, wrapped fallback, preview,
    or memory results that did not improve.
 3. State explicitly whether the 2x large-diff and 20% small-diff review gates
@@ -757,8 +761,8 @@ gate conclusion match the final raw report and the M1 values in
 | M2-S1 — Prepared diff lines | Accepted | M1 | Immutable independently styled rows |
 | M2-S2 — Virtual code viewer | Accepted | M2-S1 | Viewport-only `ScrollView` with current navigation |
 | M2-S3 — Diff integration | Accepted | M2-S1, M2-S2 | Virtual unwrapped path and lazy wrapped fallback |
-| M2-S4 — Benchmark migration | Planned | M2-S3 | M1-compatible post-virtualization raw report |
-| M2-S5 — Cleanup and comparison | Planned | M2-S1–M2-S4 | `docs/performance-m2.md` and accepted status |
+| M2-S4 — Benchmark migration | Removed | M2-S3 | Removed by product decision |
+| M2-S5 — Cleanup and comparison | Removed | M2-S1–M2-S4 | Removed by product decision |
 
 ## Verification
 
