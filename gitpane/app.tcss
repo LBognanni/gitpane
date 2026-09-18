@@ -81,6 +81,16 @@ Tab.--active {
     padding: 0 1;
 }
 
+.viewer-title-label {
+    width: 1fr;
+    height: 1;
+}
+
+.diff-actions {
+    width: auto;
+    height: 1;
+}
+
 #branch-status {
     height: 1;
     padding: 0 1;
@@ -157,7 +167,8 @@ ListView:focus > ListItem.-highlight > .file-actions {
 }
 
 .file-action,
-.header-action {
+.header-action,
+.diff-action {
     width: 3;
     min-width: 3;
     height: 1;
@@ -176,6 +187,10 @@ ListView:focus > ListItem.-highlight > .file-actions {
     background: $raised-surface;
 }
 
+.diff-action {
+    background: transparent;
+}
+
 ListView > ListItem.-hovered > .file-actions {
     background: $raised-surface;
 }
@@ -187,7 +202,9 @@ ListView:focus > ListItem.-highlight > .file-actions {
 .file-action:hover,
 .file-action:focus,
 .header-action:hover,
-.header-action:focus {
+.header-action:focus,
+.diff-action:hover,
+.diff-action:focus {
     background: $raised-surface;
     color: $text;
     text-style: bold;

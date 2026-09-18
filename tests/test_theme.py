@@ -180,6 +180,16 @@ def test_status_list_entries_are_single_line() -> None:
     )
 
 
+def test_diff_title_reserves_space_for_right_aligned_navigation() -> None:
+    stylesheet = _stylesheet()
+
+    assert _has_declaration(_rule(stylesheet, ".viewer-title-label"), "width: 1fr")
+    assert _has_declaration(_rule(stylesheet, ".diff-actions"), "width: auto")
+    assert _has_declaration(
+        _rule(stylesheet, ".file-action,\n.header-action,\n.diff-action"), "width: 3"
+    )
+
+
 def test_layout_and_diff_scroll_contracts_are_retained() -> None:
     stylesheet = _stylesheet()
     sidebar = _rule(stylesheet, "#sidebar")

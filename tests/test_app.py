@@ -104,7 +104,7 @@ def test_load_diff_view_forwards_root_and_entry_to_git_diff_then_builds(
     root = Path("/repo")
     entry = FileEntry("file.txt", Side.STAGED, "M")
     patch = "raw patch"
-    view = DiffView((Text("built"),), None)
+    view = DiffView((Text("built"),), ())
     calls: list[tuple[object, ...]] = []
 
     def fake_diff(received_root: Path, received_entry: FileEntry) -> str:
@@ -409,7 +409,7 @@ def test_diff_uses_virtual_view_and_only_populates_static_when_wrapped(
                 original_scroll_to(*args, **kwargs)  # type: ignore[arg-type]
 
             monkeypatch.setattr(virtual, "scroll_to", scroll_to)
-            app.apply_diff_view(DiffView(lines, 0), app.request_id)
+            app.apply_diff_view(DiffView(lines, (0,)), app.request_id)
             await pilot.pause()
 
             assert virtual.lines == lines
@@ -427,7 +427,9 @@ def test_diff_uses_virtual_view_and_only_populates_static_when_wrapped(
             assert isinstance(content, Text)
             assert content.plain == "\n".join(f"line {index}" for index in range(40))
 
-            app.apply_diff_view(DiffView((Text("replacement"),), 0), app.request_id)
+            app.apply_diff_view(
+                DiffView((Text("replacement"),), (0,)), app.request_id
+            )
             content = fallback.content
             assert isinstance(content, Text)
             assert content.plain == "replacement"
@@ -452,10 +454,88 @@ def test_diff_first_change_scrolls_past_leading_context(
             view = app.query_one("#diff-view", CodeView)
             lines = tuple(Text(f"line {index}") for index in range(80))
 
-            app.apply_diff_view(DiffView(lines, 17), app.request_id)
+            app.apply_diff_view(DiffView(lines, (17,)), app.request_id)
             await pilot.pause()
 
-            assert view.scroll_offset == (0, 17)
+            assert view.scroll_offset == (0, 13)
+
+    asyncio.run(exercise())
+
+
+def test_diff_change_buttons_navigate_and_disable_at_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            lines = tuple(Text(f"line {index} " + "x" * 100) for index in range(100))
+            app.apply_diff_view(DiffView(lines, (10, 30, 70)), app.request_id)
+            await pilot.pause()
+            previous = app.query_one("#previous-change", Button)
+            next_change = app.query_one("#next-change", Button)
+            view = app.query_one("#diff-view", CodeView)
+
+            assert view.scroll_y == 6
+            assert previous.disabled is True
+            assert next_change.disabled is False
+
+            assert await pilot.click(next_change)
+            await pilot.pause()
+            assert view.scroll_y == 26
+            assert previous.disabled is False
+            assert next_change.disabled is False
+
+            next_change.press()
+            await pilot.pause()
+            assert view.scroll_y == 66
+            assert previous.disabled is False
+            assert next_change.disabled is True
+
+            assert await pilot.click(previous)
+            await pilot.pause()
+            assert view.scroll_y == 26
+
+            await pilot.press("w")
+            await pilot.pause()
+            previous.press()
+            await pilot.pause()
+            content_width = app.query_one("#diff", Static).size.width
+            wrapped_row = len(
+                join_diff_lines(lines[:6]).wrap(app.console, content_width)
+            )
+            assert wrapped_row > 6
+            assert app.query_one("#diff-scroll", CodeScroll).scroll_y == wrapped_row
+            assert previous.disabled is True
+            assert next_change.disabled is False
+
+    asyncio.run(exercise())
+
+
+def test_requesting_a_diff_disables_navigation_until_it_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = FileEntry("example.py", Side.UNSTAGED, "M")
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    monkeypatch.setattr(GitPaneApp, "load_diff", lambda *_: None)
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            app.apply_diff_view(
+                DiffView(tuple(Text(str(index)) for index in range(40)), (2, 20)),
+                app.request_id,
+            )
+            await pilot.pause()
+            assert app.query_one("#next-change", Button).disabled is False
+
+            app.request_diff(entry)
+
+            assert app.query_one("#previous-change", Button).disabled is True
+            assert app.query_one("#next-change", Button).disabled is True
 
     asyncio.run(exercise())
 
@@ -471,7 +551,7 @@ def test_diff_view_supports_line_page_jump_and_long_horizontal_navigation(
         async with app.run_test(size=(80, 12)) as pilot:
             view = app.query_one("#diff-view", CodeView)
             lines = tuple(Text(f"{row:03} " + "x" * 200) for row in range(100))
-            app.apply_diff_view(DiffView(lines, None), app.request_id)
+            app.apply_diff_view(DiffView(lines, ()), app.request_id)
             await pilot.pause()
             view.focus()
 
@@ -522,11 +602,11 @@ def test_diff_request_and_refresh_clear_both_renderers(
             assert view.loading is True
             assert scroll.loading is False
 
-            app.apply_diff_view(DiffView(lines, 17), app.request_id)
+            app.apply_diff_view(DiffView(lines, (17,)), app.request_id)
             await pilot.pause()
-            assert app.diff_view == DiffView(lines, 17)
+            assert app.diff_view == DiffView(lines, (17,))
             assert view.lines == lines
-            assert view.scroll_offset == (0, 17)
+            assert view.scroll_offset == (0, 13)
             assert str(content.content) == ""
             assert view.loading is False
             assert scroll.loading is False
@@ -583,7 +663,8 @@ def test_empty_and_context_only_diffs_stay_at_origin(
             view.scroll_to(20, 20, animate=False)
             await pilot.pause()
 
-            app.apply_diff_view(DiffView(lines, first_change), app.request_id)
+            changes = () if first_change is None else (first_change,)
+            app.apply_diff_view(DiffView(lines, changes), app.request_id)
             await pilot.pause()
 
             assert view.scroll_offset == (0, 0)
@@ -602,7 +683,9 @@ def test_replacing_a_scrolled_diff_resets_offsets_and_scrolls_to_first_change(
         async with app.run_test(size=(80, 12)) as pilot:
             view = app.query_one("#diff-view", CodeView)
             app.apply_diff_view(
-                DiffView(tuple(Text("old " + "x" * 120) for _ in range(80)), 0),
+                DiffView(
+                    tuple(Text("old " + "x" * 120) for _ in range(80)), (0,)
+                ),
                 app.request_id,
             )
             await pilot.pause()
@@ -611,12 +694,12 @@ def test_replacing_a_scrolled_diff_resets_offsets_and_scrolls_to_first_change(
 
             replacement = tuple(Text(f"new {index}") for index in range(80))
             generation = view.document_generation
-            app.apply_diff_view(DiffView(replacement, 9), app.request_id)
+            app.apply_diff_view(DiffView(replacement, (9,)), app.request_id)
             await pilot.pause()
 
             assert view.lines == replacement
             assert view.document_generation == generation + 1
-            assert view.scroll_offset == (0, 9)
+            assert view.scroll_offset == (0, 5)
 
     asyncio.run(exercise())
 
@@ -633,7 +716,7 @@ def test_diff_wrap_transitions_preserve_progress_and_reset_horizontal_scroll(
             view = app.query_one("#diff-view", CodeView)
             fallback = app.query_one("#diff-scroll", CodeScroll)
             lines = tuple(Text(f"{index:03} " + "x" * 120) for index in range(100))
-            app.apply_diff_view(DiffView(lines, None), app.request_id)
+            app.apply_diff_view(DiffView(lines, ()), app.request_id)
             await pilot.pause()
             view.scroll_to(20, 30, animate=False)
             await pilot.pause()
@@ -686,7 +769,7 @@ def test_loading_a_new_diff_while_wrapped_updates_only_the_fallback(
 
             monkeypatch.setattr(fallback, "scroll_to", scroll_to)
 
-            app.apply_diff_view(DiffView(lines, 17), app.request_id)
+            app.apply_diff_view(DiffView(lines, (17,)), app.request_id)
             await pilot.pause()
 
             content = app.query_one("#diff", Static).content
@@ -694,7 +777,7 @@ def test_loading_a_new_diff_while_wrapped_updates_only_the_fallback(
             assert content.plain == "\n".join(f"new {index}" for index in range(40))
             assert scroll_calls == [
                 ((0, 0), {"animate": False}),
-                ((0, 17), {"animate": False}),
+                ((0, 13), {"animate": False}),
             ]
             assert fallback.loading is False
             assert virtual.lines == ()
@@ -714,7 +797,8 @@ def test_stale_diff_application_preserves_newer_virtual_document_state(
             app.request_id += 1
             current = app.request_id
             newer = DiffView(
-                tuple(Text(f"new {index} " + "x" * 120) for index in range(100)), 20
+                tuple(Text(f"new {index} " + "x" * 120) for index in range(100)),
+                (20,),
             )
             app.apply_diff_view(newer, current)
             await pilot.pause()
@@ -735,7 +819,7 @@ def test_stale_diff_application_preserves_newer_virtual_document_state(
                 fallback.scroll_offset,
             )
 
-            app.apply_diff_view(DiffView((Text("old"),), 0), current - 1)
+            app.apply_diff_view(DiffView((Text("old"),), (0,)), current - 1)
 
             assert (
                 app.diff_view,
@@ -1072,7 +1156,7 @@ def test_build_diff_view_prepares_independent_lines_without_a_joined_document(
     assert not hasattr(view, "text")
 
 
-def test_build_diff_view_reports_first_change_for_a_diff_with_changes(
+def test_build_diff_view_reports_changes_for_a_diff_with_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entry = FileEntry("example.diff", Side.STAGED, "M")
@@ -1085,6 +1169,7 @@ def test_build_diff_view_reports_first_change_for_a_diff_with_changes(
 
     view = build_diff_view(entry, "irrelevant patch text")
 
+    assert view.changes == (1,)
     assert view.first_change == 1
 
 
@@ -1100,6 +1185,7 @@ def test_build_diff_view_reports_none_for_an_all_context_diff(
 
     view = build_diff_view(entry, "irrelevant patch text")
 
+    assert view.changes == ()
     assert view.first_change is None
 
 

@@ -45,10 +45,18 @@ def parse(text: str) -> list[Row]:
 
 
 def first_change_index(rows: Sequence[Row]) -> int | None:
-    for index, row in enumerate(rows):
-        if row.kind in ("add", "remove"):
-            return index
-    return None
+    changes = change_indices(rows)
+    return changes[0] if changes else None
+
+
+def change_indices(rows: Sequence[Row]) -> tuple[int, ...]:
+    """Return the first row index of each contiguous changed block."""
+    return tuple(
+        index
+        for index, row in enumerate(rows)
+        if row.kind in ("add", "remove")
+        and (index == 0 or rows[index - 1].kind == "context")
+    )
 
 
 def main() -> None:

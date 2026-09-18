@@ -66,7 +66,11 @@ class DiffView:
     """A prepared, ready-to-render diff for one file entry."""
 
     lines: tuple[Text, ...]
-    first_change: int | None
+    changes: tuple[int, ...]
+
+    @property
+    def first_change(self) -> int | None:
+        return self.changes[0] if self.changes else None
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,7 @@ class PreviewView:
 
 
 MAX_PREVIEW_BYTES = 1024 * 1024
+DIFF_CONTEXT_LINES = 4
 
 
 @functools.lru_cache(maxsize=4)
@@ -84,8 +89,7 @@ def build_diff_view(entry: DiffEntry, patch: str) -> DiffView:
     """Build the prepared diff view for an entry's patch text."""
     rows = diff.parse(patch)
     lines = render_diff_rows(entry, rows)
-    first_change = diff.first_change_index(rows)
-    return DiffView(lines, first_change)
+    return DiffView(lines, diff.change_indices(rows))
 
 
 def load_diff_view(root: Path, entry: DiffEntry) -> DiffView:
@@ -352,6 +356,7 @@ class GitPaneApp(App[None]):
         self.files_lock = asyncio.Lock()
         self.diff_wrapped = False
         self.diff_view: DiffView | None = None
+        self.diff_change_index: int | None = None
         self.preview_wrapped = False
 
     def compose(self) -> ComposeResult:
@@ -432,7 +437,35 @@ class GitPaneApp(App[None]):
                     ),
                     VerticalSplitter(),
                     Vertical(
-                        Static(id="diff-title", classes="viewer-title", markup=False),
+                        Horizontal(
+                            Static(
+                                id="diff-title",
+                                classes="viewer-title-label",
+                                markup=False,
+                            ),
+                            Horizontal(
+                                Button(
+                                    "↑",
+                                    id="previous-change",
+                                    classes="diff-action",
+                                    disabled=True,
+                                    tooltip="Previous Change",
+                                    compact=True,
+                                    flat=True,
+                                ),
+                                Button(
+                                    "↓",
+                                    id="next-change",
+                                    classes="diff-action",
+                                    disabled=True,
+                                    tooltip="Next Change",
+                                    compact=True,
+                                    flat=True,
+                                ),
+                                classes="diff-actions",
+                            ),
+                            classes="viewer-title",
+                        ),
                         CodeView(id="diff-view"),
                         CodeScroll(Static(id="diff"), id="diff-scroll"),
                         id="diff-pane",
@@ -752,10 +785,12 @@ class GitPaneApp(App[None]):
         """Start loading a working-tree or historical diff."""
         self.selection = entry
         self.query_one("#diff-title", Static).update(entry.path)
+        self.diff_change_index = None
+        self._update_diff_navigation()
         self.request_id += 1
         if isinstance(entry, FileEntry) and entry.unsupported_reason is not None:
             self.apply_diff_view(
-                DiffView((Text(entry.unsupported_reason),), None), self.request_id
+                DiffView((Text(entry.unsupported_reason),), ()), self.request_id
             )
             return
         self._active_diff_widget().loading = True
@@ -787,6 +822,8 @@ class GitPaneApp(App[None]):
             return
 
         self.diff_view = view
+        self.diff_change_index = 0 if view.changes else None
+        self._update_diff_navigation()
         viewer = self._active_diff_widget()
         if self.diff_wrapped:
             self.query_one("#diff", Static).update(join_diff_lines(view.lines))
@@ -796,13 +833,13 @@ class GitPaneApp(App[None]):
         self.query_one("#diff-scroll", CodeScroll).loading = False
         viewer.scroll_to(0, 0, animate=False)
         if view.first_change is not None:
-            self.call_after_refresh(
-                viewer.scroll_to, 0, view.first_change, animate=False
-            )
+            self.call_after_refresh(self._scroll_to_diff_change, 0)
 
     def _clear_diff(self) -> None:
         """Clear both diff renderers and discard the accepted document."""
         self.diff_view = None
+        self.diff_change_index = None
+        self._update_diff_navigation()
         view = self.query_one("#diff-view", CodeView)
         scroll = self.query_one("#diff-scroll", CodeScroll)
         view.set_document(())
@@ -916,13 +953,48 @@ class GitPaneApp(App[None]):
             self.apply_entries(event.action, [event.entry])
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle bulk actions in staged and unstaged section headers."""
-        if event.button.id == "stage-selected":
+        """Handle diff navigation and bulk actions."""
+        if event.button.id == "previous-change":
+            self._navigate_diff_change(-1)
+        elif event.button.id == "next-change":
+            self._navigate_diff_change(1)
+        elif event.button.id == "stage-selected":
             self.apply_entries("stage", self._checked_entries("#unstaged-list"))
         elif event.button.id == "unstage-selected":
             self.apply_entries("unstage", self._checked_entries("#staged-list"))
         elif event.button.id == "discard-selected":
             self.request_discard(self._checked_entries("#unstaged-list"))
+
+    def _navigate_diff_change(self, offset: int) -> None:
+        """Move to an adjacent changed block in the active diff viewer."""
+        if self.diff_view is None or self.diff_change_index is None:
+            return
+        target = self.diff_change_index + offset
+        if not 0 <= target < len(self.diff_view.changes):
+            return
+        self.diff_change_index = target
+        self._update_diff_navigation()
+        self._scroll_to_diff_change(target)
+
+    def _scroll_to_diff_change(self, index: int) -> None:
+        """Scroll to a change, accounting for visual rows in wrapped diffs."""
+        if self.diff_view is None:
+            return
+        row = max(0, self.diff_view.changes[index] - DIFF_CONTEXT_LINES)
+        if self.diff_wrapped:
+            content = self.query_one("#diff", Static)
+            prefix = join_diff_lines(self.diff_view.lines[:row])
+            row = len(prefix.wrap(self.console, max(1, content.size.width)))
+        self._active_diff_widget().scroll_to(0, row, animate=False)
+
+    def _update_diff_navigation(self) -> None:
+        """Enable navigation buttons when an adjacent change exists."""
+        previous = self.query_one("#previous-change", Button)
+        next_change = self.query_one("#next-change", Button)
+        index = self.diff_change_index
+        count = len(self.diff_view.changes) if self.diff_view is not None else 0
+        previous.disabled = index is None or index == 0
+        next_change.disabled = index is None or index >= count - 1
 
     def _checked_entries(self, selector: str) -> list[FileEntry]:
         """Return checked entries from a status list."""

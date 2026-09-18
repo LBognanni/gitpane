@@ -2,7 +2,7 @@ from io import StringIO
 
 import pytest
 
-from gitpane.diff import Row, first_change_index, main, parse
+from gitpane.diff import Row, change_indices, first_change_index, main, parse
 
 
 def test_parse_maps_context_removals_and_additions() -> None:
@@ -109,6 +109,24 @@ def test_first_change_index_skips_context_before_change() -> None:
 def test_first_change_index_returns_none_for_context_only_and_empty() -> None:
     assert first_change_index([Row(1, 1, "unchanged", "context")]) is None
     assert first_change_index([]) is None
+
+
+def test_change_indices_reports_contiguous_changed_blocks() -> None:
+    rows = [
+        Row(1, 1, "leading context", "context"),
+        Row(2, None, "old", "remove"),
+        Row(None, 2, "new", "add"),
+        Row(3, 3, "middle context", "context"),
+        Row(None, 4, "inserted", "add"),
+        Row(4, 5, "trailing context", "context"),
+    ]
+
+    assert change_indices(rows) == (1, 4)
+
+
+def test_change_indices_returns_empty_for_context_only_and_empty() -> None:
+    assert change_indices([Row(1, 1, "unchanged", "context")]) == ()
+    assert change_indices([]) == ()
 
 
 def test_main_prints_summary(
