@@ -5,14 +5,17 @@ import pytest
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
-from textual.widgets import Static, TabbedContent, Tree
+from textual.widgets import Button, ListView, Static, TabbedContent, Tree
 
 from gitpane.app import (
     MAX_PREVIEW_BYTES,
     DiffView,
+    DiscardScreen,
+    FileItem,
     GitPaneApp,
     PreviewView,
     build_diff_view,
+    discard_files,
     format_commit_label,
     format_file_label,
     highlight_new_lines,
@@ -46,6 +49,12 @@ def test_format_file_label_preserves_plain_paths(
     entry: FileEntry, expected: str
 ) -> None:
     assert format_file_label(entry) == expected
+
+
+def test_format_file_label_marks_checked_entries() -> None:
+    entry = FileEntry("example.py", Side.UNSTAGED, "M")
+
+    assert format_file_label(entry, checked=True) == "[x] M example.py"
 
 
 @pytest.mark.parametrize(
@@ -1282,6 +1291,143 @@ def test_toggle_file_propagates_git_exceptions(
         toggle_file(Path("/repo"), entry)
 
     assert raised.value is sentinel
+
+
+def test_discard_files_restores_tracked_and_cleans_untracked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path("/repo")
+    calls: list[tuple[str, Path, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        "gitpane.app.git.restore",
+        lambda received_root, *paths: calls.append(("restore", received_root, paths)),
+    )
+    monkeypatch.setattr(
+        "gitpane.app.git.clean",
+        lambda received_root, *paths: calls.append(("clean", received_root, paths)),
+    )
+
+    discard_files(
+        root,
+        [
+            FileEntry("tracked.txt", Side.UNSTAGED, "M"),
+            FileEntry("new.txt", Side.UNSTAGED, "?"),
+        ],
+    )
+
+    assert calls == [
+        ("restore", root, ("tracked.txt",)),
+        ("clean", root, ("new.txt",)),
+    ]
+
+
+def test_status_actions_support_single_bulk_and_confirmed_discard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged = FileEntry("staged.txt", Side.STAGED, "M")
+    modified = FileEntry("modified.txt", Side.UNSTAGED, "M")
+    untracked = FileEntry("new.txt", Side.UNSTAGED, "?")
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    requested: list[FileEntry] = []
+
+    monkeypatch.setattr(
+        "gitpane.app.git.status",
+        lambda root: RepoState(root, [staged], [modified, untracked], "main"),
+    )
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    monkeypatch.setattr(
+        GitPaneApp,
+        "load_diff",
+        lambda _self, entry, _token: requested.append(entry),
+    )
+    monkeypatch.setattr(
+        "gitpane.app.git.stage",
+        lambda _root, *paths: calls.append(("stage", paths)),
+    )
+    monkeypatch.setattr(
+        "gitpane.app.git.unstage",
+        lambda _root, *paths: calls.append(("unstage", paths)),
+    )
+    monkeypatch.setattr(
+        "gitpane.app.git.restore",
+        lambda _root, *paths: calls.append(("restore", paths)),
+    )
+    monkeypatch.setattr(
+        "gitpane.app.git.clean",
+        lambda _root, *paths: calls.append(("clean", paths)),
+    )
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            staged_item = app.query_one("#staged-list", ListView).children[0]
+            assert isinstance(staged_item, FileItem)
+            assert staged_item.query_one(".unstage-action", Button).tooltip == (
+                "Unstage Changes"
+            )
+
+            await pilot.click(staged_item, offset=(1, 0))
+            await pilot.pause()
+            assert staged_item.checked is True
+            assert app.selection is None
+            assert requested == []
+            assert str(staged_item.query_one(".file-label", Static).content).startswith(
+                "[x]"
+            )
+            bulk_unstage = app.query_one("#unstage-selected", Button)
+            assert bulk_unstage.disabled is False
+            assert app.query_one("#staged-actions").has_class("has-selection")
+
+            assert await pilot.click(bulk_unstage)
+            await pilot.pause()
+            assert calls == [("unstage", ("staged.txt",))]
+
+            unstaged_list = app.query_one("#unstaged-list", ListView)
+            modified_item = unstaged_list.children[0]
+            assert isinstance(modified_item, FileItem)
+            await pilot.hover(modified_item)
+            await pilot.pause()
+            stage_button = modified_item.query_one(".stage-action", Button)
+            await pilot.hover(stage_button)
+            await pilot.pause()
+            assert modified_item.has_class("-hovered")
+            assert str(modified_item.query_one(".file-actions").styles.display) == (
+                "block"
+            )
+            assert await pilot.click(stage_button)
+            await pilot.pause()
+            assert calls[-1] == ("stage", ("modified.txt",))
+
+            unstaged_list = app.query_one("#unstaged-list", ListView)
+            for item in unstaged_list.children:
+                assert isinstance(item, FileItem)
+                item.toggle_checked()
+            await pilot.pause()
+            assert await pilot.click("#discard-selected")
+            await pilot.pause()
+            assert isinstance(app.screen, DiscardScreen)
+            message = app.screen.query_one("#discard-message", Static)
+            assert "Untracked files will be permanently deleted" in str(
+                message.content
+            )
+            assert app.screen.focused is app.screen.query_one("#cancel-discard")
+
+            assert await pilot.click("#confirm-discard")
+            await pilot.pause()
+            assert calls[-2:] == [
+                ("restore", ("modified.txt",)),
+                ("clean", ("new.txt",)),
+            ]
+
+            call_count = len(calls)
+            app.request_discard([modified])
+            await pilot.pause()
+            assert await pilot.click("#cancel-discard")
+            await pilot.pause()
+            assert len(calls) == call_count
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.parametrize(

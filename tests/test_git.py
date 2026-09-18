@@ -402,6 +402,11 @@ def test_commit_files_compares_with_first_parent_or_empty_tree(
             gitpane.git.unstage,
             ("restore", "--staged", "--", "-file with spaces.txt"),
         ),
+        (
+            gitpane.git.restore,
+            ("restore", "--worktree", "--", "-file with spaces.txt"),
+        ),
+        (gitpane.git.clean, ("clean", "-f", "--", "-file with spaces.txt")),
     ],
 )
 def test_stage_operations_build_commands_and_ignore_output(
@@ -422,7 +427,15 @@ def test_stage_operations_build_commands_and_ignore_output(
     assert calls == [(Path("/repository"), expected_args)]
 
 
-@pytest.mark.parametrize("operation", [gitpane.git.stage, gitpane.git.unstage])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        gitpane.git.stage,
+        gitpane.git.unstage,
+        gitpane.git.restore,
+        gitpane.git.clean,
+    ],
+)
 def test_stage_operations_propagate_run_errors(
     monkeypatch: pytest.MonkeyPatch, operation: object
 ) -> None:
@@ -438,3 +451,32 @@ def test_stage_operations_propagate_run_errors(
         operation(Path("/repository"), "-file with spaces.txt")
 
     assert raised.value is error
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_args"),
+    [
+        (gitpane.git.stage, ("add", "--", "one.txt", "two.txt")),
+        (
+            gitpane.git.unstage,
+            ("restore", "--staged", "--", "one.txt", "two.txt"),
+        ),
+    ],
+)
+def test_stage_operations_accept_multiple_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: object,
+    expected_args: tuple[str, ...],
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(_root: Path, *args: str) -> str:
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    assert callable(operation)
+    operation(Path("/repository"), "one.txt", "two.txt")
+
+    assert calls == [expected_args]

@@ -16,9 +16,18 @@ from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import ListItem, ListView, Static, TabbedContent, TabPane, Tree
+from textual.screen import ModalScreen
+from textual.widgets import (
+    Button,
+    ListItem,
+    ListView,
+    Static,
+    TabbedContent,
+    TabPane,
+    Tree,
+)
 from textual.widgets.tree import TreeNode
 
 from gitpane import diff, git, icons
@@ -34,9 +43,10 @@ scrollbar_click_target = _scrollbar_click_target
 DiffEntry = FileEntry | CommitFile
 
 
-def format_file_label(entry: FileEntry) -> str:
+def format_file_label(entry: FileEntry, *, checked: bool = False) -> str:
     """Return the plain-text label for a status entry."""
-    return f"[ ] {entry.status} {entry.path}"
+    mark = "x" if checked else " "
+    return f"[{mark}] {entry.status} {entry.path}"
 
 
 def format_commit_label(commit: Commit) -> Text:
@@ -121,6 +131,16 @@ def toggle_file(root: Path, entry: FileEntry) -> None:
         git.stage(root, entry.path)
 
 
+def discard_files(root: Path, entries: Sequence[FileEntry]) -> None:
+    """Discard tracked changes and remove untracked entries."""
+    tracked = [entry.path for entry in entries if entry.status != "?"]
+    untracked = [entry.path for entry in entries if entry.status == "?"]
+    if tracked:
+        git.restore(root, *tracked)
+    if untracked:
+        git.clean(root, *untracked)
+
+
 def reconstruct_new_source(rows: Sequence[Row]) -> str:
     """Reconstruct the new side of a diff from its non-removal rows."""
     return "\n".join(row.text for row in rows if row.kind != "remove")
@@ -188,24 +208,109 @@ def join_diff_lines(lines: Sequence[Text]) -> Text:
 class FileItem(ListItem):
     """A status entry displayed in a file list."""
 
-    class ToggleRequested(Message):
-        """Request that an entry be staged or unstaged."""
+    class SelectionChanged(Message):
+        """Report that the item's bulk selection changed."""
 
-        def __init__(self, entry: FileEntry) -> None:
+    class ActionRequested(Message):
+        """Request a single-file stage, unstage, or discard action."""
+
+        def __init__(self, entry: FileEntry, action: str) -> None:
             self.entry = entry
+            self.action = action
             super().__init__()
 
     def __init__(self, entry: FileEntry) -> None:
         self.entry = entry
-        super().__init__(Static(format_file_label(entry), markup=False))
+        self.checked = False
+        action = "unstage" if entry.side is Side.STAGED else "stage"
+        arrow = "↓" if entry.side is Side.STAGED else "↑"
+        buttons = [
+            Button(
+                arrow,
+                classes=f"file-action {action}-action",
+                name=action,
+                tooltip="Unstage Changes" if action == "unstage" else "Stage Changes",
+                compact=True,
+                flat=True,
+            ),
+        ]
+        if entry.side is Side.UNSTAGED:
+            buttons.append(
+                Button(
+                    "↶",
+                    classes="file-action discard-action",
+                    name="discard",
+                    tooltip="Discard Changes",
+                    compact=True,
+                    flat=True,
+                )
+            )
+        super().__init__(
+            Static(format_file_label(entry), classes="file-label", markup=False),
+            Horizontal(*buttons, classes="file-actions"),
+        )
+
+    def toggle_checked(self) -> None:
+        """Toggle this item for a later bulk action."""
+        self.checked = not self.checked
+        self.query_one(".file-label", Static).update(
+            format_file_label(self.entry, checked=self.checked)
+        )
+        self.post_message(self.SelectionChanged())
 
     def _on_click(self, event: events.Click) -> None:  # type: ignore[override]
+        if isinstance(event.widget, Button):
+            event.prevent_default()
+            event.stop()
+            return
         offset = event.get_content_offset(self)
         if offset is not None and is_prefix_offset(offset.x):
+            event.prevent_default()
             event.stop()
-            self.post_message(self.ToggleRequested(self.entry))
+            self.toggle_checked()
             return
-        self.post_message(self._ChildClicked(self))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Translate a compact row button into a file action."""
+        if event.button.name is not None:
+            self.post_message(self.ActionRequested(self.entry, event.button.name))
+
+
+class DiscardScreen(ModalScreen[bool]):
+    """Confirm a destructive discard operation."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, entries: Sequence[FileEntry]) -> None:
+        super().__init__()
+        self.entries = tuple(entries)
+
+    def compose(self) -> ComposeResult:
+        count = len(self.entries)
+        noun = "file" if count == 1 else "files"
+        message = f"Discard changes to {count} {noun}? This cannot be undone."
+        if any(entry.status == "?" for entry in self.entries):
+            message += " Untracked files will be permanently deleted."
+        with Center():
+            yield Vertical(
+                Static("Discard Changes?", id="discard-title"),
+                Static(message, id="discard-message"),
+                Horizontal(
+                    Button("Cancel", id="cancel-discard"),
+                    Button("Discard", variant="error", id="confirm-discard"),
+                    id="discard-buttons",
+                ),
+                id="discard-dialog",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-discard", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-discard")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 class GitPaneApp(App[None]):
@@ -242,14 +347,55 @@ class GitPaneApp(App[None]):
                 yield Horizontal(
                     Vertical(
                         Vertical(
-                            Static("Staged", classes="panel-title"),
+                            Horizontal(
+                                Static("Staged", classes="panel-title-label"),
+                                Horizontal(
+                                    Button(
+                                        "↓",
+                                        id="unstage-selected",
+                                        classes="header-action",
+                                        disabled=True,
+                                        tooltip="Unstage Selected Changes",
+                                        compact=True,
+                                        flat=True,
+                                    ),
+                                    classes="header-actions",
+                                    id="staged-actions",
+                                ),
+                                classes="panel-title",
+                            ),
                             ListView(id="staged-list"),
                             id="staged-section",
                             classes="sidebar-section",
                         ),
                         HorizontalSplitter(),
                         Vertical(
-                            Static("Unstaged", classes="panel-title"),
+                            Horizontal(
+                                Static("Unstaged", classes="panel-title-label"),
+                                Horizontal(
+                                    Button(
+                                        "↑",
+                                        id="stage-selected",
+                                        classes="header-action",
+                                        disabled=True,
+                                        tooltip="Stage Selected Changes",
+                                        compact=True,
+                                        flat=True,
+                                    ),
+                                    Button(
+                                        "↶",
+                                        id="discard-selected",
+                                        classes="header-action discard-action",
+                                        disabled=True,
+                                        tooltip="Discard Selected Changes",
+                                        compact=True,
+                                        flat=True,
+                                    ),
+                                    classes="header-actions",
+                                    id="unstaged-actions",
+                                ),
+                                classes="panel-title",
+                            ),
                             ListView(id="unstaged-list"),
                             id="unstaged-section",
                             classes="sidebar-section",
@@ -301,7 +447,7 @@ class GitPaneApp(App[None]):
         item = focused.highlighted_child
         if not isinstance(item, FileItem):
             return
-        await self.toggle_entry(item.entry)
+        item.toggle_checked()
 
     def action_toggle_wrap(self) -> None:
         """Toggle wrapping in the viewer on the active tab."""
@@ -400,6 +546,7 @@ class GitPaneApp(App[None]):
         await unstaged_list.clear()
         await staged_list.extend(FileItem(entry) for entry in state.staged)
         await unstaged_list.extend(FileItem(entry) for entry in state.unstaged)
+        self._update_bulk_actions()
 
         self.selection = None
         self.query_one("#branch-status", Static).update(f"Branch: {state.branch}")
@@ -592,15 +739,69 @@ class GitPaneApp(App[None]):
         preview_scroll.loading = False
         preview_scroll.scroll_to(0, 0, animate=False)
 
-    async def on_file_item_toggle_requested(
-        self, event: FileItem.ToggleRequested
-    ) -> None:
-        await self.toggle_entry(event.entry)
+    def on_file_item_selection_changed(self, _: FileItem.SelectionChanged) -> None:
+        self._update_bulk_actions()
 
-    async def toggle_entry(self, entry: FileEntry) -> None:
-        toggle_file(self.root, entry)
+    async def on_file_item_action_requested(
+        self, event: FileItem.ActionRequested
+    ) -> None:
+        if event.action == "discard":
+            self.request_discard([event.entry])
+        else:
+            await self.apply_entries(event.action, [event.entry])
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle bulk actions in staged and unstaged section headers."""
+        if event.button.id == "stage-selected":
+            await self.apply_entries("stage", self._checked_entries("#unstaged-list"))
+        elif event.button.id == "unstage-selected":
+            await self.apply_entries("unstage", self._checked_entries("#staged-list"))
+        elif event.button.id == "discard-selected":
+            self.request_discard(self._checked_entries("#unstaged-list"))
+
+    def _checked_entries(self, selector: str) -> list[FileEntry]:
+        """Return checked entries from a status list."""
+        return [
+            item.entry
+            for item in self.query_one(selector, ListView).children
+            if isinstance(item, FileItem) and item.checked
+        ]
+
+    def _update_bulk_actions(self) -> None:
+        """Enable and reveal section actions when files are checked."""
+        staged = bool(self._checked_entries("#staged-list"))
+        unstaged = bool(self._checked_entries("#unstaged-list"))
+        self.query_one("#staged-actions").set_class(staged, "has-selection")
+        self.query_one("#unstaged-actions").set_class(unstaged, "has-selection")
+        self.query_one("#unstage-selected", Button).disabled = not staged
+        self.query_one("#stage-selected", Button).disabled = not unstaged
+        self.query_one("#discard-selected", Button).disabled = not unstaged
+
+    async def apply_entries(
+        self, action: str, entries: Sequence[FileEntry]
+    ) -> None:
+        """Apply a stage or unstage action to one or more entries."""
+        if not entries:
+            return
+        paths = [entry.path for entry in entries]
+        if action == "stage":
+            git.stage(self.root, *paths)
+        else:
+            git.unstage(self.root, *paths)
         await self.refresh_status()
 
+    def request_discard(self, entries: Sequence[FileEntry]) -> None:
+        """Ask for confirmation before discarding entries."""
+        if not entries:
+            return
+        selected = tuple(entries)
+
+        async def finish(confirmed: bool | None) -> None:
+            if confirmed:
+                discard_files(self.root, selected)
+                await self.refresh_status()
+
+        self.push_screen(DiscardScreen(selected), finish)
 
 def main() -> None:
     """Run GitPane for the current repository."""

@@ -46,8 +46,10 @@ lines scroll horizontally.
 | Up/Down | Move through the focused file list |
 | Enter or click a file | Load its diff |
 | Enter or click a commit | Expand its changed files |
-| Space | Stage the focused unstaged file, or unstage the focused staged file |
-| Click `[ ]` | Stage or unstage that file |
+| Space or click `[ ]` | Check or uncheck the focused file for a bulk action |
+| Hover a file and click `↑` / `↓` | Stage or unstage that file |
+| Hover an unstaged file and click `↶` | Discard its changes after confirmation |
+| Section-header actions | Stage, unstage, or discard all checked files |
 | Drag a divider | Resize the Changes sidebar or its sections |
 | `r` | Refresh repository status and files |
 
@@ -56,7 +58,8 @@ between repository changes and the filesystem browser. Refresh reloads both.
 
 ## Current Scope
 
-GitPane supports whole-file staging and unstaging, syntax-highlighted unified
-diffs, and safe text-file previews up to 1 MiB in an accessible dark theme. It
-does not yet support hunk or line staging, commits, conflict resolution,
-renames, binary previews, or automatic file watching.
+GitPane supports whole-file staging, unstaging, and confirmed discarding; bulk
+file actions; syntax-highlighted unified diffs; and safe text-file previews up
+to 1 MiB in an accessible dark theme. It does not yet support hunk or line
+staging, commits, conflict resolution, renames, binary previews, or automatic
+file watching.

@@ -220,14 +220,24 @@ def diff(root: Path, entry: FileEntry | CommitFile) -> str:
     return _run(root, "diff", "-U9999", "--no-color", "--no-ext-diff", "--", entry.path)
 
 
-def stage(root: Path, path: str) -> None:
-    """Stage *path* in *root*."""
-    _run(root, "add", "--", path)
+def stage(root: Path, *paths: str) -> None:
+    """Stage *paths* in *root*."""
+    _run(root, "add", "--", *paths)
 
 
-def unstage(root: Path, path: str) -> None:
-    """Unstage *path* in *root*."""
-    _run(root, "restore", "--staged", "--", path)
+def unstage(root: Path, *paths: str) -> None:
+    """Unstage *paths* in *root*."""
+    _run(root, "restore", "--staged", "--", *paths)
+
+
+def restore(root: Path, *paths: str) -> None:
+    """Discard working-tree changes to tracked *paths*."""
+    _run(root, "restore", "--worktree", "--", *paths)
+
+
+def clean(root: Path, *paths: str) -> None:
+    """Remove untracked *paths* from the working tree."""
+    _run(root, "clean", "-f", "--", *paths)
 
 
 def main() -> None:

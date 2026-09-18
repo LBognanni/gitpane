@@ -144,13 +144,13 @@ def test_list_states_have_the_locked_hierarchy() -> None:
     stylesheet = _stylesheet()
     expected = {
         "ListView > ListItem": ("background: $surface", "color: $text"),
-        "ListView > ListItem:hover": ("background: $raised-surface",),
-        "ListView > ListItem.--highlight": (
+        "ListView > ListItem.-hovered": ("background: $raised-surface",),
+        "ListView > ListItem.-highlight": (
             "background: $inactive-selection",
             "color: $text",
         ),
         "ListView:focus": ("border: solid $focus",),
-        "ListView:focus > ListItem.--highlight": (
+        "ListView:focus > ListItem.-highlight": (
             "background: $focused-selection",
             "color: $text",
             "text-style: bold",
@@ -167,7 +167,7 @@ def test_list_states_have_the_locked_hierarchy() -> None:
     )
     assert item_state_rules, "missing ListItem state rules"
     assert (
-        item_state_rules[-1].group(1).strip() == "ListView:focus > ListItem.--highlight"
+        item_state_rules[-1].group(1).strip() == "ListView:focus > ListItem.-highlight"
     )
 
 

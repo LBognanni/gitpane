@@ -56,6 +56,26 @@ Tab.--active {
     text-style: bold;
 }
 
+.panel-title {
+    height: 1;
+    width: 100%;
+}
+
+.panel-title-label {
+    width: 1fr;
+    height: 1;
+}
+
+.header-actions {
+    display: none;
+    width: auto;
+    height: 1;
+}
+
+.header-actions.has-selection {
+    display: block;
+}
+
 .viewer-title {
     height: 1;
     padding: 0 1;
@@ -108,17 +128,81 @@ ListView > ListItem {
     height: 1;
     background: $surface;
     color: $text;
+    layers: base actions;
+}
+
+ListView > ListItem > .file-label {
+    layer: base;
+    width: 100%;
+    height: 1;
+    text-wrap: nowrap;
 }
 
 ListView > ListItem > Static {
     text-wrap: nowrap;
 }
 
-ListView > ListItem:hover {
+.file-actions {
+    layer: actions;
+    dock: right;
+    display: none;
+    width: auto;
+    height: 1;
+    background: $surface;
+}
+
+ListView > ListItem.-hovered > .file-actions,
+ListView:focus > ListItem.-highlight > .file-actions {
+    display: block;
+}
+
+.file-action,
+.header-action {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    margin: 0;
+    border: none;
+    color: $muted-text;
+}
+
+.file-action {
+    background: transparent;
+}
+
+.header-action {
     background: $raised-surface;
 }
 
-ListView > ListItem.--highlight {
+ListView > ListItem.-hovered > .file-actions {
+    background: $raised-surface;
+}
+
+ListView:focus > ListItem.-highlight > .file-actions {
+    background: $focused-selection;
+}
+
+.file-action:hover,
+.file-action:focus,
+.header-action:hover,
+.header-action:focus {
+    background: $raised-surface;
+    color: $text;
+    text-style: bold;
+}
+
+.discard-action:hover,
+.discard-action:focus {
+    color: #ff7b72;
+}
+
+ListView > ListItem.-hovered {
+    background: $raised-surface;
+}
+
+ListView > ListItem.-highlight {
     background: $inactive-selection;
     color: $text;
 }
@@ -127,10 +211,44 @@ ListView:focus {
     border: solid $focus;
 }
 
-ListView:focus > ListItem.--highlight {
+ListView:focus > ListItem.-highlight {
     background: $focused-selection;
     color: $text;
     text-style: bold;
+}
+
+DiscardScreen {
+    align: center middle;
+    background: $canvas 70%;
+}
+
+#discard-dialog {
+    width: 60;
+    max-width: 90%;
+    height: auto;
+    padding: 1 2;
+    background: $raised-surface;
+    border: solid $border;
+}
+
+#discard-title {
+    height: 1;
+    color: $text;
+    text-style: bold;
+}
+
+#discard-message {
+    height: auto;
+    margin: 1 0;
+}
+
+#discard-buttons {
+    height: 3;
+    align-horizontal: right;
+}
+
+#discard-buttons Button {
+    margin-left: 1;
 }
 
 #diff-view {
