@@ -12,7 +12,7 @@ MAX_COMMITS = 100
 def _run(cwd: Path, *args: str, allowed_returncodes: tuple[int, ...] = (0,)) -> str:
     """Run a Git command in *cwd* and return its standard output."""
     result = subprocess.run(
-        ["git", *args],
+        ["git", "--literal-pathspecs", *args],
         cwd=cwd,
         capture_output=True,
         check=False,

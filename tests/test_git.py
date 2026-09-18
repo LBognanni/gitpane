@@ -116,7 +116,7 @@ def test_run_preserves_subprocess_settings_and_environment(
     assert gitpane.git._run(Path("/repository"), "status", "--short") == "output"
 
     command, kwargs = calls[0]
-    assert command == ["git", "status", "--short"]
+    assert command == ["git", "--literal-pathspecs", "status", "--short"]
     assert kwargs["cwd"] == Path("/repository")
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
