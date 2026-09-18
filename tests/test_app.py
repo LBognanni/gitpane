@@ -7,6 +7,7 @@ import pytest
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
+from textual.content import Content
 from textual.widgets import Button, ListView, Static, TabbedContent, Tree
 
 from gitpane.app import (
@@ -255,13 +256,13 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     commit = Commit("full-hash", "abc1234", "parent-hash", "Add history")
-    entry = CommitFile("src/history.py", "M", commit.hash, commit.parent)
+    entry = CommitFile("[bold]report.txt", "M", commit.hash, commit.parent)
     requested: list[tuple[CommitFile, int]] = []
 
     monkeypatch.setattr(
         "gitpane.app.git.status",
         lambda root: RepoState(
-            root, [FileEntry("working.txt", Side.STAGED, "M")], [], "main"
+            root, [FileEntry("working.txt", Side.STAGED, "M")], [], "[bold]feature"
         ),
     )
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [commit])
@@ -281,9 +282,10 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             tree = app.query_one("#commit-tree", Tree)
             commit_node = tree.root.children[0]
             assert str(commit_node.label) == "Add history abc1234"
-            assert (
-                str(app.query_one("#branch-status", Static).content) == "Branch: main"
-            )
+            branch_status = app.query_one("#branch-status", Static).render()
+            assert isinstance(branch_status, Content)
+            assert branch_status.plain == "Branch: [bold]feature"
+            assert branch_status.spans == []
 
             assert await pilot.click(tree, offset=(1, 1))
             await app.workers.wait_for_complete()
@@ -292,7 +294,7 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             assert commit_node.is_expanded
             assert len(commit_node.children) == 1
             file_node = commit_node.children[0]
-            assert str(file_node.label) == "M src/history.py"
+            assert str(file_node.label) == "M [bold]report.txt"
 
             assert await pilot.click(tree, offset=(8, 1))
             assert commit_node.is_collapsed
@@ -311,7 +313,10 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
 
             assert requested == [(entry, app.request_id)]
             assert app.selection == entry
-            assert str(app.query_one("#diff-title", Static).content) == entry.path
+            diff_title = app.query_one("#diff-title", Static).render()
+            assert isinstance(diff_title, Content)
+            assert diff_title.plain == entry.path
+            assert diff_title.spans == []
 
     asyncio.run(exercise())
 
@@ -319,14 +324,14 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
 def test_file_selection_shows_repository_relative_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = tmp_path / "nested" / "example.py"
+    path = tmp_path / "nested" / "[bold]report.txt"
     path.parent.mkdir()
     path.write_text("answer = 42\n")
     monkeypatch.setattr(
         "gitpane.app.git.status", lambda root: RepoState(root, [], [], "main")
     )
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
-    monkeypatch.setattr("gitpane.app.git.files", lambda _: ["nested/example.py"])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: ["nested/[bold]report.txt"])
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
@@ -337,7 +342,10 @@ def test_file_selection_shows_repository_relative_path(
             await pilot.pause()
 
             title = app.query_one("#preview-title", Static)
-            assert str(title.content) == "nested/example.py"
+            rendered_title = title.render()
+            assert isinstance(rendered_title, Content)
+            assert rendered_title.plain == "nested/[bold]report.txt"
+            assert rendered_title.spans == []
 
     asyncio.run(exercise())
 

@@ -432,7 +432,7 @@ class GitPaneApp(App[None]):
                     ),
                     VerticalSplitter(),
                     Vertical(
-                        Static(id="diff-title", classes="viewer-title"),
+                        Static(id="diff-title", classes="viewer-title", markup=False),
                         CodeView(id="diff-view"),
                         CodeScroll(Static(id="diff"), id="diff-scroll"),
                         id="diff-pane",
@@ -443,13 +443,13 @@ class GitPaneApp(App[None]):
                 yield Horizontal(
                     files_tree,
                     Vertical(
-                        Static(id="preview-title", classes="viewer-title"),
+                        Static(id="preview-title", classes="viewer-title", markup=False),
                         CodeScroll(Static(id="preview"), id="preview-scroll"),
                         id="preview-pane",
                     ),
                     id="files-body",
                 )
-        yield Static(id="branch-status")
+        yield Static(id="branch-status", markup=False)
 
     def on_mount(self) -> None:
         self.refresh_status()
