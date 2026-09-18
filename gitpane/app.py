@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import os
 import stat
@@ -33,7 +34,7 @@ from textual.widgets.tree import TreeNode
 
 from gitpane import diff, git, icons
 from gitpane.diff import Row
-from gitpane.model import Commit, CommitFile, FileEntry, Side
+from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
 from gitpane.widgets import CodeScroll, CodeView, HorizontalSplitter, VerticalSplitter
 from gitpane.widgets import JumpScrollBar as _JumpScrollBar
 from gitpane.widgets import scrollbar_click_target as _scrollbar_click_target
@@ -340,8 +341,15 @@ class GitPaneApp(App[None]):
         self.cwd = cwd or root
         self.selection: DiffEntry | None = None
         self.request_id = 0
+        self.status_request_id = 0
+        self.history_request_id = 0
+        self.files_request_id = 0
         self.commit_files_request_id = 0
         self.preview_request_id = 0
+        self.mutation_lock = asyncio.Lock()
+        self.status_apply_lock = asyncio.Lock()
+        self.history_lock = asyncio.Lock()
+        self.files_lock = asyncio.Lock()
         self.diff_wrapped = False
         self.diff_view: DiffView | None = None
         self.preview_wrapped = False
@@ -443,13 +451,14 @@ class GitPaneApp(App[None]):
                 )
         yield Static(id="branch-status")
 
-    async def on_mount(self) -> None:
-        await self.refresh_status()
+    def on_mount(self) -> None:
+        self.refresh_status()
         self.refresh_history()
         self.refresh_files()
 
-    async def action_refresh(self) -> None:
-        await self.refresh_status()
+    def action_refresh(self) -> None:
+        """Reload repository views without blocking the event thread."""
+        self.refresh_status()
         self.refresh_history()
         self.refresh_files()
 
@@ -549,47 +558,109 @@ class GitPaneApp(App[None]):
             animate=False,
         )
 
-    async def refresh_status(self) -> None:
+    def refresh_status(self) -> None:
+        """Request a working-tree status refresh."""
+        token = self._start_status_refresh()
+        self.load_status(token)
+
+    def _start_status_refresh(self) -> int:
+        """Set status loading state and return a new request token."""
+        self.status_request_id += 1
         self.request_id += 1
+        self.query_one("#staged-list", ListView).loading = True
+        self.query_one("#unstaged-list", ListView).loading = True
+        return self.status_request_id
+
+    @work(group="status")
+    async def load_status(self, token: int) -> None:
+        """Load repository status without blocking the event thread."""
         try:
-            state = git.status(self.root)
+            async with self.mutation_lock:
+                if not is_current_request(token, self.status_request_id):
+                    return
+                state = await asyncio.to_thread(git.status, self.root)
         except (subprocess.SubprocessError, OSError) as error:
-            self.query_one("#diff-view", CodeView).loading = False
-            self.query_one("#diff-scroll", CodeScroll).loading = False
-            self._show_git_error("refresh status", error)
+            self.apply_status_error(error, token)
             return
-        staged_list = self.query_one("#staged-list", ListView)
-        unstaged_list = self.query_one("#unstaged-list", ListView)
+        await self.apply_status(state, token)
 
-        await staged_list.clear()
-        await unstaged_list.clear()
-        await staged_list.extend(FileItem(entry) for entry in state.staged)
-        await unstaged_list.extend(FileItem(entry) for entry in state.unstaged)
-        self._update_bulk_actions()
+    def apply_status_error(
+        self, error: subprocess.SubprocessError | OSError, token: int
+    ) -> None:
+        """Report a status failure if it belongs to the newest request."""
+        if not is_current_request(token, self.status_request_id):
+            return
+        self.query_one("#staged-list", ListView).loading = False
+        self.query_one("#unstaged-list", ListView).loading = False
+        self.query_one("#diff-view", CodeView).loading = False
+        self.query_one("#diff-scroll", CodeScroll).loading = False
+        self._show_git_error("refresh status", error)
 
-        self.selection = None
-        self.query_one("#branch-status", Static).update(f"Branch: {state.branch}")
-        self.query_one("#diff-title", Static).update("")
-        self._clear_diff()
+    async def apply_status(self, state: RepoState, token: int) -> None:
+        """Apply status data on the event thread if it is still current."""
+        async with self.status_apply_lock:
+            if not is_current_request(token, self.status_request_id):
+                return
+            self.request_id += 1
+            staged_list = self.query_one("#staged-list", ListView)
+            unstaged_list = self.query_one("#unstaged-list", ListView)
 
-        if state.staged:
-            staged_list.index = 0
-            staged_list.focus()
-        elif state.unstaged:
-            unstaged_list.index = 0
-            unstaged_list.focus()
+            await staged_list.clear()
+            await unstaged_list.clear()
+            await staged_list.extend(FileItem(entry) for entry in state.staged)
+            await unstaged_list.extend(FileItem(entry) for entry in state.unstaged)
+            staged_list.loading = False
+            unstaged_list.loading = False
+            self._update_bulk_actions()
+
+            self.selection = None
+            self.query_one("#branch-status", Static).update(f"Branch: {state.branch}")
+            self.query_one("#diff-title", Static).update("")
+            self._clear_diff()
+
+            if state.staged:
+                staged_list.index = 0
+                staged_list.focus()
+            elif state.unstaged:
+                unstaged_list.index = 0
+                unstaged_list.focus()
 
     def refresh_history(self) -> None:
-        """Reload the latest commits on the current branch."""
+        """Request the latest commits on the current branch."""
+        self.history_request_id += 1
+        self.commit_files_request_id += 1
+        self.query_one("#commit-tree", Tree).loading = True
+        self.load_history(self.history_request_id)
+
+    @work(group="history")
+    async def load_history(self, token: int) -> None:
+        """Load commit history without blocking the event thread."""
+        try:
+            async with self.history_lock:
+                if not is_current_request(token, self.history_request_id):
+                    return
+                commits = await asyncio.to_thread(git.commits, self.root)
+        except (subprocess.SubprocessError, OSError) as error:
+            self.apply_history_error(error, token)
+            return
+        self.apply_history(commits, token)
+
+    def apply_history_error(
+        self, error: subprocess.SubprocessError | OSError, token: int
+    ) -> None:
+        """Report a history failure if it belongs to the newest request."""
+        if not is_current_request(token, self.history_request_id):
+            return
+        self.query_one("#commit-tree", Tree).loading = False
+        self._show_git_error("refresh history", error)
+
+    def apply_history(self, commits: list[Commit], token: int) -> None:
+        """Apply commit history if it belongs to the newest request."""
+        if not is_current_request(token, self.history_request_id):
+            return
         self.commit_files_request_id += 1
         tree = self.query_one("#commit-tree", Tree)
         tree.clear()
-        try:
-            commits = git.commits(self.root)
-        except (subprocess.SubprocessError, OSError) as error:
-            tree.loading = False
-            self._show_git_error("refresh history", error)
-            return
         for commit in commits:
             tree.root.add(format_commit_label(commit), commit)
 
@@ -603,19 +674,49 @@ class GitPaneApp(App[None]):
             tree.focus()
 
     def refresh_files(self) -> None:
-        """Reload the file tree rooted at the launch directory."""
+        """Request a file-tree refresh rooted at the launch directory."""
+        self.files_request_id += 1
+        self.preview_request_id += 1
+        tree = self.query_one("#files-tree", Tree)
+        tree.loading = True
+        self.load_files(self.files_request_id)
+
+    @work(group="files")
+    async def load_files(self, token: int) -> None:
+        """Discover repository files without blocking the event thread."""
+        try:
+            async with self.files_lock:
+                if not is_current_request(token, self.files_request_id):
+                    return
+                files = [
+                    Path(relative)
+                    for relative in await asyncio.to_thread(git.files, self.cwd)
+                ]
+        except (subprocess.SubprocessError, OSError) as error:
+            self.apply_files_error(error, token)
+            return
+        self.apply_files(files, token)
+
+    def apply_files_error(
+        self, error: subprocess.SubprocessError | OSError, token: int
+    ) -> None:
+        """Report file discovery failure for the newest request."""
+        if not is_current_request(token, self.files_request_id):
+            return
+        self.query_one("#files-tree", Tree).loading = False
+        self.query_one("#preview-scroll", VerticalScroll).loading = False
+        self._show_git_error("refresh files", error)
+
+    def apply_files(self, files: list[Path], token: int) -> None:
+        """Apply discovered files if they belong to the newest request."""
+        if not is_current_request(token, self.files_request_id):
+            return
         self.preview_request_id += 1
         tree = self.query_one("#files-tree", Tree)
         tree.clear()
         tree.root.set_label(icons.folder_label(str(self.cwd), expanded=True))
         tree.root.expand()
         nodes: dict[tuple[str, ...], TreeNode[Path]] = {(): tree.root}
-        try:
-            files = [Path(relative) for relative in git.files(self.cwd)]
-        except (subprocess.SubprocessError, OSError) as error:
-            self.query_one("#preview-scroll", VerticalScroll).loading = False
-            self._show_git_error("refresh files", error)
-            return
         for path in files:
             parts = path.parts
             parent_parts: tuple[str, ...] = ()
@@ -635,6 +736,7 @@ class GitPaneApp(App[None]):
             )
 
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
+        tree.loading = False
         self.query_one("#preview-title", Static).update("")
         self.query_one("#preview", Static).update("")
         preview_scroll.loading = False
@@ -807,20 +909,18 @@ class GitPaneApp(App[None]):
     def on_file_item_selection_changed(self, _: FileItem.SelectionChanged) -> None:
         self._update_bulk_actions()
 
-    async def on_file_item_action_requested(
-        self, event: FileItem.ActionRequested
-    ) -> None:
+    def on_file_item_action_requested(self, event: FileItem.ActionRequested) -> None:
         if event.action == "discard":
             self.request_discard([event.entry])
         else:
-            await self.apply_entries(event.action, [event.entry])
+            self.apply_entries(event.action, [event.entry])
 
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle bulk actions in staged and unstaged section headers."""
         if event.button.id == "stage-selected":
-            await self.apply_entries("stage", self._checked_entries("#unstaged-list"))
+            self.apply_entries("stage", self._checked_entries("#unstaged-list"))
         elif event.button.id == "unstage-selected":
-            await self.apply_entries("unstage", self._checked_entries("#staged-list"))
+            self.apply_entries("unstage", self._checked_entries("#staged-list"))
         elif event.button.id == "discard-selected":
             self.request_discard(self._checked_entries("#unstaged-list"))
 
@@ -842,22 +942,40 @@ class GitPaneApp(App[None]):
         self.query_one("#stage-selected", Button).disabled = not unstaged
         self.query_one("#discard-selected", Button).disabled = not unstaged
 
-    async def apply_entries(
-        self, action: str, entries: Sequence[FileEntry]
-    ) -> None:
-        """Apply a stage or unstage action to one or more entries."""
+    def apply_entries(self, action: str, entries: Sequence[FileEntry]) -> None:
+        """Queue a stage or unstage action for one or more entries."""
         entries = [entry for entry in entries if entry.unsupported_reason is None]
         if not entries:
             return
+        self.mutate_entries(action, tuple(entries))
+
+    @work(group="mutations")
+    async def mutate_entries(
+        self, action: str, entries: tuple[FileEntry, ...]
+    ) -> None:
+        """Run one mutation at a time without blocking the event thread."""
         paths = [entry.path for entry in entries]
-        try:
-            if action == "stage":
-                git.stage(self.root, *paths)
-            else:
-                git.unstage(self.root, *paths)
-        except (subprocess.SubprocessError, OSError) as error:
-            self._show_git_error(action, error)
-        await self.refresh_status()
+        async with self.mutation_lock:
+            try:
+                if action == "stage":
+                    await asyncio.to_thread(git.stage, self.root, *paths)
+                elif action == "unstage":
+                    await asyncio.to_thread(git.unstage, self.root, *paths)
+                elif action == "discard":
+                    await asyncio.to_thread(discard_files, self.root, entries)
+                else:
+                    return
+            except (subprocess.SubprocessError, OSError) as error:
+                self._show_git_error(
+                    "discard changes" if action == "discard" else action, error
+                )
+            token = self._start_status_refresh()
+            try:
+                state = await asyncio.to_thread(git.status, self.root)
+            except (subprocess.SubprocessError, OSError) as error:
+                self.apply_status_error(error, token)
+                return
+            await self.apply_status(state, token)
 
     def request_discard(self, entries: Sequence[FileEntry]) -> None:
         """Ask for confirmation before discarding entries."""
@@ -866,13 +984,9 @@ class GitPaneApp(App[None]):
             return
         selected = tuple(entries)
 
-        async def finish(confirmed: bool | None) -> None:
+        def finish(confirmed: bool | None) -> None:
             if confirmed:
-                try:
-                    discard_files(self.root, selected)
-                except (subprocess.SubprocessError, OSError) as error:
-                    self._show_git_error("discard changes", error)
-                await self.refresh_status()
+                self.mutate_entries("discard", selected)
 
         self.push_screen(DiscardScreen(selected), finish)
 
