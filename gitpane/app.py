@@ -586,8 +586,9 @@ class GitPaneApp(App[None]):
         tree.root.set_label(icons.folder_label(str(self.cwd), expanded=True))
         tree.root.expand()
         nodes: dict[tuple[str, ...], TreeNode[Path]] = {(): tree.root}
-        for relative in git.files(self.cwd):
-            parts = Path(relative).parts
+        files = [Path(relative) for relative in git.files(self.cwd)]
+        for path in files:
+            parts = path.parts
             parent_parts: tuple[str, ...] = ()
             for part in parts[:-1]:
                 branch_parts = (*parent_parts, part)
@@ -597,8 +598,11 @@ class GitPaneApp(App[None]):
                         icons.folder_label(part, expanded=False), directory
                     )
                 parent_parts = branch_parts
+        for path in files:
+            parts = path.parts
+            parent_parts = parts[:-1]
             nodes[parent_parts].add_leaf(
-                icons.file_label(parts[-1]), self.cwd / relative
+                icons.file_label(parts[-1]), self.cwd / path
             )
 
         preview_scroll = self.query_one("#preview-scroll", VerticalScroll)

@@ -195,7 +195,7 @@ def test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views(
 
     def fake_files(received_cwd: Path) -> list[str]:
         calls.append(("files", received_cwd))
-        return ["[directory]/example.py", "[red]top.txt"]
+        return ["[red]top.txt", "[directory]/example.py"]
 
     monkeypatch.setattr("gitpane.app.git.status", fake_status)
     monkeypatch.setattr("gitpane.app.git.files", fake_files)
