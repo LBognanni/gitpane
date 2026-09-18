@@ -17,11 +17,22 @@ def _run(cwd: Path, *args: str, allowed_returncodes: tuple[int, ...] = (0,)) -> 
         capture_output=True,
         check=False,
         text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
         env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
     if result.returncode not in allowed_returncodes:
         result.check_returncode()
     return result.stdout
+
+
+def error_message(error: subprocess.SubprocessError | OSError) -> str:
+    """Return the most useful user-facing detail from a Git failure."""
+    if isinstance(error, subprocess.CalledProcessError):
+        stderr = error.stderr
+        if isinstance(stderr, str) and stderr.strip():
+            return stderr.strip()
+    return str(error)
 
 
 def repo_root(path: Path | None = None) -> Path:
@@ -98,6 +109,18 @@ def files(cwd: Path) -> list[str]:
     return sorted(path for path in output.split("\0") if path)
 
 
+def _head(root: Path) -> str:
+    """Return HEAD's object ID, or an empty string for an unborn branch."""
+    return _run(
+        root,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "HEAD",
+        allowed_returncodes=(0, 1),
+    ).strip()
+
+
 def _parse_commits(output: str) -> list[Commit]:
     """Parse NUL-delimited commit metadata from ``git log``."""
     fields = output.split("\0")
@@ -119,13 +142,14 @@ def _parse_commits(output: str) -> list[Commit]:
 
 def commits(root: Path) -> list[Commit]:
     """Return up to 100 commits reachable from the current branch."""
+    if not _head(root):
+        return []
     output = _run(
         root,
         "log",
         f"--max-count={MAX_COMMITS}",
         "-z",
         "--format=%H%x00%h%x00%P%x00%s",
-        allowed_returncodes=(0, 128),
     )
     return _parse_commits(output)
 
@@ -227,7 +251,10 @@ def stage(root: Path, *paths: str) -> None:
 
 def unstage(root: Path, *paths: str) -> None:
     """Unstage *paths* in *root*."""
-    _run(root, "restore", "--staged", "--", *paths)
+    if _head(root):
+        _run(root, "restore", "--staged", "--", *paths)
+    else:
+        _run(root, "rm", "--cached", "-f", "--", *paths)
 
 
 def restore(root: Path, *paths: str) -> None:

@@ -120,6 +120,8 @@ def test_run_preserves_subprocess_settings_and_environment(
     assert kwargs["cwd"] == Path("/repository")
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "surrogateescape"
     assert kwargs["check"] is False
     assert "shell" not in kwargs
     environment = kwargs["env"]
@@ -172,6 +174,16 @@ def test_run_rejects_return_code_two_when_one_is_allowed(
 
     with pytest.raises(subprocess.CalledProcessError):
         gitpane.git._run(Path("/repository"), "diff", allowed_returncodes=(0, 1))
+
+
+def test_error_message_prefers_git_stderr() -> None:
+    error = subprocess.CalledProcessError(
+        128,
+        ["git", "status"],
+        stderr="fatal: Unable to create index.lock\n",
+    )
+
+    assert gitpane.git.error_message(error) == "fatal: Unable to create index.lock"
 
 
 @pytest.mark.parametrize(
@@ -316,6 +328,8 @@ def test_commits_requests_at_most_100_from_current_branch(
 
     def fake_run(root: Path, *args: str, **kwargs: tuple[int, ...]) -> str:
         calls.append((root, args, kwargs))
+        if args[0] == "rev-parse":
+            return "hash\n"
         return "hash\0short\0\0Subject\0"
 
     monkeypatch.setattr(gitpane.git, "_run", fake_run)
@@ -326,15 +340,33 @@ def test_commits_requests_at_most_100_from_current_branch(
     assert calls == [
         (
             Path("/repository"),
+            ("rev-parse", "--verify", "--quiet", "HEAD"),
+            {"allowed_returncodes": (0, 1)},
+        ),
+        (
+            Path("/repository"),
             (
                 "log",
                 "--max-count=100",
                 "-z",
                 "--format=%H%x00%h%x00%P%x00%s",
             ),
-            {"allowed_returncodes": (0, 128)},
+            {},
         )
     ]
+
+
+def test_commits_skips_log_on_unborn_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(_root: Path, *args: str, **_: object) -> str:
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    assert gitpane.git.commits(Path("/repository")) == []
+    assert calls == [("rev-parse", "--verify", "--quiet", "HEAD")]
 
 
 def test_parse_commit_files_preserves_status_and_path() -> None:
@@ -399,10 +431,6 @@ def test_commit_files_compares_with_first_parent_or_empty_tree(
     [
         (gitpane.git.stage, ("add", "--", "-file with spaces.txt")),
         (
-            gitpane.git.unstage,
-            ("restore", "--staged", "--", "-file with spaces.txt"),
-        ),
-        (
             gitpane.git.restore,
             ("restore", "--worktree", "--", "-file with spaces.txt"),
         ),
@@ -441,7 +469,7 @@ def test_stage_operations_propagate_run_errors(
 ) -> None:
     error = subprocess.CalledProcessError(1, ["git", "command"])
 
-    def fake_run(root: Path, *args: str) -> str:
+    def fake_run(root: Path, *args: str, **_: object) -> str:
         raise error
 
     monkeypatch.setattr(gitpane.git, "_run", fake_run)
@@ -457,10 +485,6 @@ def test_stage_operations_propagate_run_errors(
     ("operation", "expected_args"),
     [
         (gitpane.git.stage, ("add", "--", "one.txt", "two.txt")),
-        (
-            gitpane.git.unstage,
-            ("restore", "--staged", "--", "one.txt", "two.txt"),
-        ),
     ],
 )
 def test_stage_operations_accept_multiple_paths(
@@ -480,3 +504,34 @@ def test_stage_operations_accept_multiple_paths(
     operation(Path("/repository"), "one.txt", "two.txt")
 
     assert calls == [expected_args]
+
+
+@pytest.mark.parametrize(
+    ("head", "expected_args"),
+    [
+        ("commit-hash\n", ("restore", "--staged", "--", "one.txt", "two.txt")),
+        ("", ("rm", "--cached", "-f", "--", "one.txt", "two.txt")),
+    ],
+)
+def test_unstage_handles_existing_and_unborn_heads(
+    monkeypatch: pytest.MonkeyPatch,
+    head: str,
+    expected_args: tuple[str, ...],
+) -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_run(_root: Path, *args: str, **kwargs: object) -> str:
+        calls.append((args, kwargs))
+        return head if args[0] == "rev-parse" else ""
+
+    monkeypatch.setattr(gitpane.git, "_run", fake_run)
+
+    gitpane.git.unstage(Path("/repository"), "one.txt", "two.txt")
+
+    assert calls == [
+        (
+            ("rev-parse", "--verify", "--quiet", "HEAD"),
+            {"allowed_returncodes": (0, 1)},
+        ),
+        (expected_args, {}),
+    ]

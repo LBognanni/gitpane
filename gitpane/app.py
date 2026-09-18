@@ -1,6 +1,7 @@
 import functools
 import os
 import stat
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -538,7 +539,13 @@ class GitPaneApp(App[None]):
 
     async def refresh_status(self) -> None:
         self.request_id += 1
-        state = git.status(self.root)
+        try:
+            state = git.status(self.root)
+        except (subprocess.SubprocessError, OSError) as error:
+            self.query_one("#diff-view", CodeView).loading = False
+            self.query_one("#diff-scroll", CodeScroll).loading = False
+            self._show_git_error("refresh status", error)
+            return
         staged_list = self.query_one("#staged-list", ListView)
         unstaged_list = self.query_one("#unstaged-list", ListView)
 
@@ -565,7 +572,12 @@ class GitPaneApp(App[None]):
         self.commit_files_request_id += 1
         tree = self.query_one("#commit-tree", Tree)
         tree.clear()
-        commits = git.commits(self.root)
+        try:
+            commits = git.commits(self.root)
+        except (subprocess.SubprocessError, OSError) as error:
+            tree.loading = False
+            self._show_git_error("refresh history", error)
+            return
         for commit in commits:
             tree.root.add(format_commit_label(commit), commit)
 
@@ -586,7 +598,12 @@ class GitPaneApp(App[None]):
         tree.root.set_label(icons.folder_label(str(self.cwd), expanded=True))
         tree.root.expand()
         nodes: dict[tuple[str, ...], TreeNode[Path]] = {(): tree.root}
-        files = [Path(relative) for relative in git.files(self.cwd)]
+        try:
+            files = [Path(relative) for relative in git.files(self.cwd)]
+        except (subprocess.SubprocessError, OSError) as error:
+            self.query_one("#preview-scroll", VerticalScroll).loading = False
+            self._show_git_error("refresh files", error)
+            return
         for path in files:
             parts = path.parts
             parent_parts: tuple[str, ...] = ()
@@ -628,8 +645,22 @@ class GitPaneApp(App[None]):
     @work(thread=True, exclusive=True, group="diff")
     def load_diff(self, entry: DiffEntry, token: int) -> None:
         """Load a diff on a thread worker and hand the result to the app."""
-        view = load_diff_view(self.root, entry)
+        try:
+            view = load_diff_view(self.root, entry)
+        except (subprocess.SubprocessError, OSError) as error:
+            self.call_from_thread(self.apply_diff_error, error, token)
+            return
         self.call_from_thread(self.apply_diff_view, view, token)
+
+    def apply_diff_error(
+        self, error: subprocess.SubprocessError | OSError, token: int
+    ) -> None:
+        """Stop the current diff loader and report its Git failure."""
+        if not is_current_request(token, self.request_id):
+            return
+        self.query_one("#diff-view", CodeView).loading = False
+        self.query_one("#diff-scroll", CodeScroll).loading = False
+        self._show_git_error("load diff", error)
 
     def apply_diff_view(self, view: DiffView, token: int) -> None:
         """Apply a loaded diff view if it is still the current request."""
@@ -710,8 +741,21 @@ class GitPaneApp(App[None]):
         self, commit: Commit, node: TreeNode[object], token: int
     ) -> None:
         """Load one commit's changed files on a thread worker."""
-        entries = git.commit_files(self.root, commit)
+        try:
+            entries = git.commit_files(self.root, commit)
+        except (subprocess.SubprocessError, OSError) as error:
+            self.call_from_thread(self.apply_commit_files_error, error, token)
+            return
         self.call_from_thread(self.apply_commit_files, entries, node, token)
+
+    def apply_commit_files_error(
+        self, error: subprocess.SubprocessError | OSError, token: int
+    ) -> None:
+        """Stop the current history loader and report its Git failure."""
+        if not is_current_request(token, self.commit_files_request_id):
+            return
+        self.query_one("#commit-tree", Tree).loading = False
+        self._show_git_error("load commit files", error)
 
     def apply_commit_files(
         self, entries: list[CommitFile], node: TreeNode[object], token: int
@@ -788,10 +832,13 @@ class GitPaneApp(App[None]):
         if not entries:
             return
         paths = [entry.path for entry in entries]
-        if action == "stage":
-            git.stage(self.root, *paths)
-        else:
-            git.unstage(self.root, *paths)
+        try:
+            if action == "stage":
+                git.stage(self.root, *paths)
+            else:
+                git.unstage(self.root, *paths)
+        except (subprocess.SubprocessError, OSError) as error:
+            self._show_git_error(action, error)
         await self.refresh_status()
 
     def request_discard(self, entries: Sequence[FileEntry]) -> None:
@@ -802,10 +849,23 @@ class GitPaneApp(App[None]):
 
         async def finish(confirmed: bool | None) -> None:
             if confirmed:
-                discard_files(self.root, selected)
+                try:
+                    discard_files(self.root, selected)
+                except (subprocess.SubprocessError, OSError) as error:
+                    self._show_git_error("discard changes", error)
                 await self.refresh_status()
 
         self.push_screen(DiscardScreen(selected), finish)
+
+    def _show_git_error(
+        self, action: str, error: subprocess.SubprocessError | OSError
+    ) -> None:
+        """Display a Git failure without terminating the application."""
+        self.notify(
+            git.error_message(error),
+            title=f"Could not {action}",
+            severity="error",
+        )
 
 def main() -> None:
     """Run GitPane for the current repository."""

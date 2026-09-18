@@ -1,4 +1,5 @@
 import asyncio
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1426,6 +1427,108 @@ def test_status_actions_support_single_bulk_and_confirmed_discard(
             assert await pilot.click("#cancel-discard")
             await pilot.pause()
             assert len(calls) == call_count
+
+    asyncio.run(exercise())
+
+
+def test_git_failures_are_reported_without_terminating_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = subprocess.CalledProcessError(
+        128,
+        ["git", "status"],
+        stderr="fatal: index.lock already exists\n",
+    )
+    notifications: list[tuple[str, str | None, str]] = []
+
+    def fail_status(_: Path) -> RepoState:
+        raise error
+
+    def record_notification(
+        _self: GitPaneApp,
+        message: str,
+        *,
+        title: str | None = None,
+        severity: str = "information",
+        **_: object,
+    ) -> None:
+        notifications.append((message, title, severity))
+
+    monkeypatch.setattr("gitpane.app.git.status", fail_status)
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    monkeypatch.setattr(GitPaneApp, "notify", record_notification)
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test():
+            assert app.query_one("#branch-status", Static)
+
+    asyncio.run(exercise())
+
+    assert notifications == [
+        (
+            "fatal: index.lock already exists",
+            "Could not refresh status",
+            "error",
+        )
+    ]
+
+
+def test_diff_failure_clears_loading_and_reports_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    notifications: list[str] = []
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test():
+            monkeypatch.setattr(
+                app,
+                "notify",
+                lambda message, **_: notifications.append(message),
+            )
+            app.query_one("#diff-view", CodeView).loading = True
+            app.apply_diff_error(
+                subprocess.CalledProcessError(
+                    1, ["git", "diff"], stderr="fatal: diff failed\n"
+                ),
+                app.request_id,
+            )
+
+            assert app.query_one("#diff-view", CodeView).loading is False
+            assert app.query_one("#diff-scroll", CodeScroll).loading is False
+
+    asyncio.run(exercise())
+
+    assert notifications == ["fatal: diff failed"]
+
+
+def test_status_failure_invalidates_diff_and_clears_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    def fail_status(_: Path) -> RepoState:
+        raise subprocess.CalledProcessError(128, ["git", "status"])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test():
+            monkeypatch.setattr(app, "notify", lambda *_, **__: None)
+            monkeypatch.setattr("gitpane.app.git.status", fail_status)
+            app.query_one("#diff-view", CodeView).loading = True
+            app.query_one("#diff-scroll", CodeScroll).loading = True
+
+            await app.refresh_status()
+
+            assert app.query_one("#diff-view", CodeView).loading is False
+            assert app.query_one("#diff-scroll", CodeScroll).loading is False
 
     asyncio.run(exercise())
 
