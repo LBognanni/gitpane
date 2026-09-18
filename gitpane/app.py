@@ -46,6 +46,8 @@ DiffEntry = FileEntry | CommitFile
 
 def format_file_label(entry: FileEntry, *, checked: bool = False) -> str:
     """Return the plain-text label for a status entry."""
+    if entry.unsupported_reason is not None:
+        return f"[!] {entry.status} {entry.path} - {entry.unsupported_reason}"
     mark = "x" if checked else " "
     return f"[{mark}] {entry.status} {entry.path}"
 
@@ -223,6 +225,10 @@ class FileItem(ListItem):
     def __init__(self, entry: FileEntry) -> None:
         self.entry = entry
         self.checked = False
+        label = Static(format_file_label(entry), classes="file-label", markup=False)
+        if entry.unsupported_reason is not None:
+            super().__init__(label)
+            return
         action = "unstage" if entry.side is Side.STAGED else "stage"
         arrow = "↓" if entry.side is Side.STAGED else "↑"
         buttons = [
@@ -247,12 +253,14 @@ class FileItem(ListItem):
                 )
             )
         super().__init__(
-            Static(format_file_label(entry), classes="file-label", markup=False),
+            label,
             Horizontal(*buttons, classes="file-actions"),
         )
 
     def toggle_checked(self) -> None:
         """Toggle this item for a later bulk action."""
+        if self.entry.unsupported_reason is not None:
+            return
         self.checked = not self.checked
         self.query_one(".file-label", Static).update(
             format_file_label(self.entry, checked=self.checked)
@@ -265,7 +273,11 @@ class FileItem(ListItem):
             event.stop()
             return
         offset = event.get_content_offset(self)
-        if offset is not None and is_prefix_offset(offset.x):
+        if (
+            self.entry.unsupported_reason is None
+            and offset is not None
+            and is_prefix_offset(offset.x)
+        ):
             event.prevent_default()
             event.stop()
             self.toggle_checked()
@@ -639,6 +651,11 @@ class GitPaneApp(App[None]):
         self.selection = entry
         self.query_one("#diff-title", Static).update(entry.path)
         self.request_id += 1
+        if isinstance(entry, FileEntry) and entry.unsupported_reason is not None:
+            self.apply_diff_view(
+                DiffView((Text(entry.unsupported_reason),), None), self.request_id
+            )
+            return
         self._active_diff_widget().loading = True
         self.load_diff(entry, self.request_id)
 
@@ -829,6 +846,7 @@ class GitPaneApp(App[None]):
         self, action: str, entries: Sequence[FileEntry]
     ) -> None:
         """Apply a stage or unstage action to one or more entries."""
+        entries = [entry for entry in entries if entry.unsupported_reason is None]
         if not entries:
             return
         paths = [entry.path for entry in entries]
@@ -843,6 +861,7 @@ class GitPaneApp(App[None]):
 
     def request_discard(self, entries: Sequence[FileEntry]) -> None:
         """Ask for confirmation before discarding entries."""
+        entries = [entry for entry in entries if entry.unsupported_reason is None]
         if not entries:
             return
         selected = tuple(entries)

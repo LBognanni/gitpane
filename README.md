@@ -35,6 +35,8 @@ The **Changes** tab lists staged files, unstaged files, and up to 100 recent
 commits from the current branch. Select a commit to expand its changed files,
 then select a file to show its historical diff. The selected file is shown
 above each viewer, and the current branch appears in the bottom status bar. The
+changes lists also show renames and merge conflicts with an explanation; these
+entries cannot be staged, unstaged, discarded, or previewed yet. The
 **Files** tab shows tracked and non-ignored untracked files below the directory
 where GitPane was launched; select one for a syntax-highlighted preview. Long
 lines scroll horizontally.

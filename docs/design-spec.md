@@ -29,7 +29,7 @@ Step 2 — git.py
 One _run() helper that sets cwd=root and GIT_OPTIONAL_LOCKS=0, then:
 
 repo_root() → rev-parse --show-toplevel
-status() → status --porcelain=v2 -z --untracked-files=all, split on \0, handle only 1 (ordinary) and ? (untracked) records; skip 2 and u lines for now
+status() → status --porcelain=v2 -z --untracked-files=all, split on \0, handle 1 (ordinary), ? (untracked), 2 (rename/copy), and u (unmerged) records; mark rename/copy and unmerged entries as visible but unsupported
 diff(entry) → --cached -U9999 for staged, plain -U9999 for unstaged; both with --no-color --no-ext-diff
 stage(path) / unstage(path)
 

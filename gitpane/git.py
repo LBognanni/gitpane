@@ -72,7 +72,26 @@ def _parse_status(output: str, root: Path) -> RepoState:
         elif record.startswith("? "):
             unstaged.append(FileEntry(record[2:], Side.UNSTAGED, "?"))
         elif record.startswith("2 "):
-            next(records, None)
+            original_path = next(records, None)
+            fields = record.split(" ", maxsplit=9)
+            if len(fields) != 10 or len(fields[1]) != 2 or original_path is None:
+                continue
+            x, y, path = fields[1][0], fields[1][1], fields[9]
+            change = "Copy" if fields[8].startswith("C") else "Rename"
+            reason = f"{change} from {original_path} is not supported."
+            for code, side, entries in (
+                (x, Side.STAGED, staged),
+                (y, Side.UNSTAGED, unstaged),
+            ):
+                if code != ".":
+                    entries.append(FileEntry(path, side, code, reason))
+        elif record.startswith("u "):
+            fields = record.split(" ", maxsplit=10)
+            if len(fields) != 11 or len(fields[1]) != 2:
+                continue
+            conflict, path = fields[1], fields[10]
+            reason = f"Conflict ({conflict}) resolution is not supported."
+            unstaged.append(FileEntry(path, Side.UNSTAGED, "U", reason))
 
     if branch == "(detached)" and oid:
         branch = f"detached at {oid[:7]}"

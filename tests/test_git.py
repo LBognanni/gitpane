@@ -32,11 +32,11 @@ def test_parse_status_maps_ordinary_changes() -> None:
     ]
 
 
-def test_parse_status_handles_untracked_and_unsupported_records() -> None:
+def test_parse_status_handles_untracked_rename_and_unmerged_records() -> None:
     root = Path("/repository")
     output = (
         "\0? path with spaces.txt\0"
-        "2 R. N... 100644 100644 100644 hash hash score new.txt\0old.txt\0"
+        "2 RM N... 100644 100644 100644 hash hash R100 new.txt\0old.txt\0"
         "u UU N... 100644 100644 100644 100644 hash hash hash conflict.txt\0"
         "x unknown record\0"
         "1 D. N... 100644 100644 100644 hash hash deleted.txt\0\0"
@@ -44,17 +44,54 @@ def test_parse_status_handles_untracked_and_unsupported_records() -> None:
 
     state = _parse_status(output, root)
 
-    assert state.staged == [FileEntry("deleted.txt", Side.STAGED, "D")]
-    assert state.unstaged == [FileEntry("path with spaces.txt", Side.UNSTAGED, "?")]
+    rename_reason = "Rename from old.txt is not supported."
+    assert state.staged == [
+        FileEntry("new.txt", Side.STAGED, "R", rename_reason),
+        FileEntry("deleted.txt", Side.STAGED, "D"),
+    ]
+    assert state.unstaged == [
+        FileEntry("path with spaces.txt", Side.UNSTAGED, "?"),
+        FileEntry("new.txt", Side.UNSTAGED, "M", rename_reason),
+        FileEntry(
+            "conflict.txt",
+            Side.UNSTAGED,
+            "U",
+            "Conflict (UU) resolution is not supported.",
+        ),
+    ]
 
 
-def test_parse_status_skips_rename_continuation() -> None:
+def test_parse_status_treats_rename_continuation_as_original_path() -> None:
     state = _parse_status(
-        "2 R. N... 100644 100644 100644 hash hash score new.txt\0? phantom.txt\0",
+        "2 R. N... 100644 100644 100644 hash hash R100 new.txt\0? old.txt\0",
         Path("/repository"),
     )
 
-    assert state.staged == []
+    assert state.staged == [
+        FileEntry(
+            "new.txt",
+            Side.STAGED,
+            "R",
+            "Rename from ? old.txt is not supported.",
+        )
+    ]
+    assert state.unstaged == []
+
+
+def test_parse_status_reports_copies_as_unsupported() -> None:
+    state = _parse_status(
+        "2 C. N... 100644 100644 100644 hash hash C100 copy.txt\0source.txt\0",
+        Path("/repository"),
+    )
+
+    assert state.staged == [
+        FileEntry(
+            "copy.txt",
+            Side.STAGED,
+            "C",
+            "Copy from source.txt is not supported.",
+        )
+    ]
     assert state.unstaged == []
 
 

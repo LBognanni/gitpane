@@ -13,6 +13,7 @@ class FileEntry:
     path: str
     side: Side
     status: str
+    unsupported_reason: str | None = None
 
 
 @dataclass(frozen=True)

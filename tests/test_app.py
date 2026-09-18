@@ -58,6 +58,19 @@ def test_format_file_label_marks_checked_entries() -> None:
     assert format_file_label(entry, checked=True) == "[x] M example.py"
 
 
+def test_format_file_label_explains_unsupported_entries() -> None:
+    entry = FileEntry(
+        "renamed.py",
+        Side.STAGED,
+        "R",
+        "Rename from original.py is not supported.",
+    )
+
+    assert format_file_label(entry) == (
+        "[!] R renamed.py - Rename from original.py is not supported."
+    )
+
+
 @pytest.mark.parametrize(
     ("subject", "expected"),
     [
@@ -1427,6 +1440,46 @@ def test_status_actions_support_single_bulk_and_confirmed_discard(
             assert await pilot.click("#cancel-discard")
             await pilot.pause()
             assert len(calls) == call_count
+
+    asyncio.run(exercise())
+
+
+def test_unsupported_status_entries_are_visible_and_not_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reason = "Conflict (UU) resolution is not supported."
+    entry = FileEntry("conflict.txt", Side.UNSTAGED, "U", reason)
+    loaded: list[FileEntry] = []
+    monkeypatch.setattr(
+        "gitpane.app.git.status", lambda root: RepoState(root, [], [entry], "main")
+    )
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    monkeypatch.setattr(
+        GitPaneApp, "load_diff", lambda _self, selected, _token: loaded.append(selected)
+    )
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test() as pilot:
+            item = app.query_one("#unstaged-list", ListView).children[0]
+            assert isinstance(item, FileItem)
+            assert str(item.query_one(".file-label", Static).content) == (
+                "[!] U conflict.txt - " + reason
+            )
+            assert list(item.query(Button)) == []
+
+            item.toggle_checked()
+            await pilot.pause()
+            assert item.checked is False
+            assert app.query_one("#stage-selected", Button).disabled is True
+            assert app.query_one("#discard-selected", Button).disabled is True
+
+            await pilot.click(item, offset=(1, 0))
+            await pilot.pause()
+            assert app.selection == entry
+            assert loaded == []
+            assert app.query_one("#diff-view", CodeView).lines == (Text(reason),)
 
     asyncio.run(exercise())
 
