@@ -295,15 +295,12 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             assert str(file_node.label) == "M src/history.py"
 
             assert await pilot.click(tree, offset=(8, 1))
-            await pilot.pause()
             assert commit_node.is_collapsed
 
             assert await pilot.click(tree, offset=(8, 1))
-            await pilot.pause()
             assert commit_node.is_expanded
 
             assert await pilot.click(tree, offset=(1, 1))
-            await pilot.pause()
             assert commit_node.is_collapsed
 
             commit_node.expand()
@@ -355,7 +352,6 @@ def test_wrap_toggle_applies_independently_to_each_viewer(
         app = GitPaneApp(tmp_path)
         async with app.run_test() as pilot:
             await pilot.press("w")
-            await pilot.pause()
 
             assert app.diff_wrapped is True
             assert app.preview_wrapped is False
@@ -366,7 +362,6 @@ def test_wrap_toggle_applies_independently_to_each_viewer(
             syntax = Syntax("value = 'a long line'", "python", word_wrap=False)
             app.apply_preview_view(PreviewView(syntax), app.preview_request_id)
             await pilot.press("w")
-            await pilot.pause()
 
             assert app.diff_wrapped is True
             assert app.preview_wrapped is True
@@ -375,7 +370,6 @@ def test_wrap_toggle_applies_independently_to_each_viewer(
             assert syntax.word_wrap is True
 
             await pilot.press("w")
-            await pilot.pause()
 
             assert app.preview_wrapped is False
             assert syntax.word_wrap is False
@@ -474,12 +468,10 @@ def test_diff_view_supports_line_page_jump_and_long_horizontal_navigation(
             view.focus()
 
             await pilot.press("down")
-            await pilot.pause()
             assert view.scroll_y == 1
 
             page_height = view.scrollable_content_region.height
             await pilot.press("pagedown")
-            await pilot.pause()
             assert view.scroll_y == 1 + page_height
 
             scrollbar = view.vertical_scrollbar
@@ -487,9 +479,15 @@ def test_diff_view_supports_line_page_jump_and_long_horizontal_navigation(
             await pilot.pause()
             assert view.scroll_y == view.max_scroll_y
 
-            await pilot.press(*("right",) * 300)
+            await pilot.press("right")
+            assert view.scroll_x == 1
+
+            # Check the end of a long line without hundreds of simulated keys.
+            view.scroll_to(x=view.max_scroll_x - 1, animate=False)
             await pilot.pause()
-            assert view.scroll_x == view.max_scroll_x
+            for _ in range(2):
+                await pilot.press("right")
+                assert view.scroll_x == view.max_scroll_x
 
     asyncio.run(exercise())
 

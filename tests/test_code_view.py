@@ -213,28 +213,31 @@ def test_keyboard_and_scrollbar_navigation_is_bounded() -> None:
             view.focus()
 
             await pilot.press("down", "right")
-            await pilot.pause()
             assert view.scroll_offset == (1, 1)
 
             page_height = view.scrollable_content_region.height
             await pilot.press("pagedown")
-            await pilot.pause()
             assert view.scroll_y == 1 + page_height
 
-            await pilot.press(*("pagedown",) * 100)
+            # Exercise clamping near each boundary without traversing the document.
+            view.scroll_to(y=view.max_scroll_y - 1, animate=False)
             await pilot.pause()
-            assert view.scroll_y == view.max_scroll_y
-            assert 0 <= view.scroll_y <= view.max_scroll_y
+            for _ in range(2):
+                await pilot.press("pagedown")
+                assert view.scroll_y == view.max_scroll_y
 
-            await pilot.press(*("pageup",) * 100)
+            view.scroll_to(y=1, animate=False)
             await pilot.pause()
-            assert view.scroll_y == 0
-            assert 0 <= view.scroll_y <= view.max_scroll_y
+            for _ in range(2):
+                await pilot.press("pageup")
+                assert view.scroll_y == 0
 
-            await pilot.press(*("right",) * 100)
+            view.scroll_to(x=view.max_scroll_x - 1, animate=False)
             await pilot.pause()
-            assert view.scroll_x == view.max_scroll_x
-            assert view.scroll_y == 0
+            for _ in range(2):
+                await pilot.press("right")
+                assert view.scroll_x == view.max_scroll_x
+                assert view.scroll_y == 0
 
             scrollbar = view.vertical_scrollbar
             assert await pilot.click(scrollbar, offset=(0, scrollbar.size.height - 1))
