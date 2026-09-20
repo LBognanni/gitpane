@@ -239,6 +239,11 @@ DiscardScreen {
     background: $canvas 70%;
 }
 
+ShortcutScreen {
+    align: center middle;
+    background: $canvas 70%;
+}
+
 #discard-dialog {
     width: 60;
     max-width: 90%;
@@ -266,6 +271,31 @@ DiscardScreen {
 
 #discard-buttons Button {
     margin-left: 1;
+}
+
+#shortcuts-dialog {
+    width: 60;
+    max-width: 90%;
+    height: auto;
+    padding: 1 2;
+    background: $raised-surface;
+    border: solid $border;
+}
+
+#shortcuts-title {
+    height: 1;
+    color: $text;
+    text-style: bold;
+}
+
+#shortcuts-list {
+    height: auto;
+    margin: 1 0;
+    color: $text;
+}
+
+#close-shortcuts {
+    align-horizontal: right;
 }
 
 #diff-view {

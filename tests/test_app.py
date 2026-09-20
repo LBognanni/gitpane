@@ -17,7 +17,9 @@ from gitpane.app import (
     FileItem,
     GitPaneApp,
     PreviewView,
+    ShortcutScreen,
     build_diff_view,
+    claim_first_launch,
     discard_files,
     format_commit_label,
     format_file_label,
@@ -96,6 +98,150 @@ def test_format_commit_label_expands_gitmoji_and_places_hash_last(
 @pytest.fixture(autouse=True)
 def _clear_diff_view_cache() -> None:
     build_diff_view.cache_clear()
+
+
+def test_claim_first_launch_uses_platform_state_path_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "native-state" / "gitpane"
+    calls: list[tuple[object, ...]] = []
+
+    def fake_user_state_path(*args: object, **kwargs: object) -> Path:
+        calls.append((*args, kwargs))
+        return state_path
+
+    monkeypatch.setattr("gitpane.app.user_state_path", fake_user_state_path)
+
+    assert claim_first_launch() is True
+    assert (state_path / "shortcuts-shown").is_file()
+    assert claim_first_launch() is False
+    assert calls == [
+        ("gitpane", {"appauthor": False, "ensure_exists": True}),
+        ("gitpane", {"appauthor": False, "ensure_exists": True}),
+    ]
+
+
+def test_claim_first_launch_accepts_an_isolated_marker_path(tmp_path: Path) -> None:
+    marker = tmp_path / "state" / "welcome-shown"
+
+    assert claim_first_launch(marker) is True
+    assert marker.is_file()
+    assert claim_first_launch(marker) is False
+
+
+def test_claim_first_launch_shows_help_when_marker_parent_is_invalid(
+    tmp_path: Path,
+) -> None:
+    invalid_parent = tmp_path / "not-a-directory"
+    invalid_parent.write_text("contents")
+
+    assert claim_first_launch(invalid_parent / "shortcuts-shown") is True
+
+
+def test_shortcut_popup_opens_on_first_launch_and_with_h(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, show_shortcuts=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, ShortcutScreen)
+            assert app.screen.focused is app.screen.query_one("#close-shortcuts")
+            shortcut_content = str(
+                app.screen.query_one("#shortcuts-list", Static).content
+            )
+            assert "Mouse controls are supported throughout." in shortcut_content
+            assert "s           Stage or unstage" in shortcut_content
+            assert app.screen.query_one("#shortcuts-dialog").styles.width.value == 60
+
+            await pilot.press("h")
+            await pilot.pause()
+            assert not isinstance(app.screen, ShortcutScreen)
+
+            await pilot.press("h")
+            await pilot.pause()
+            assert isinstance(app.screen, ShortcutScreen)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, ShortcutScreen)
+
+    asyncio.run(exercise())
+
+
+def test_keyboard_shortcuts_navigate_and_act_on_the_focused_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = FileEntry("first.txt", Side.STAGED, "M")
+    second = FileEntry("second.txt", Side.STAGED, "M")
+    unstaged = FileEntry("unstaged.txt", Side.UNSTAGED, "M")
+    monkeypatch.setattr(
+        "gitpane.app.git.status",
+        lambda root: RepoState(root, [first, second], [unstaged]),
+    )
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            actions: list[tuple[str, FileEntry]] = []
+            discards: list[FileEntry] = []
+            monkeypatch.setattr(
+                app,
+                "apply_entries",
+                lambda action, entries: actions.append((action, entries[0])),
+            )
+            monkeypatch.setattr(
+                app,
+                "request_discard",
+                lambda entries: discards.append(entries[0]),
+            )
+
+            staged_list = app.query_one("#staged-list", ListView)
+            assert staged_list.index == 0
+            await pilot.press("j")
+            assert staged_list.index == 1
+            await pilot.press("k")
+            assert staged_list.index == 0
+            await pilot.press("s")
+
+            unstaged_list = app.query_one("#unstaged-list", ListView)
+            unstaged_list.index = 0
+            unstaged_list.focus()
+            await pilot.press("s")
+            await pilot.press("d")
+
+            assert actions == [("unstage", first), ("stage", unstaged)]
+            assert discards == [unstaged]
+
+            tabs = app.query_one("#main-tabs", TabbedContent)
+            await pilot.press("2")
+            assert tabs.active == "files-tab"
+            assert app.focused is app.query_one("#files-tree", Tree)
+            await pilot.press("1")
+            assert tabs.active == "changes-tab"
+            assert app.focused is staged_list
+            await pilot.press("j")
+            assert staged_list.index == 1
+
+            app.apply_diff_view(
+                DiffView(tuple(Text(str(index)) for index in range(40)), (5, 20)),
+                app.request_id,
+            )
+            await pilot.pause()
+            await pilot.press("n")
+            assert app.diff_change_index == 1
+            await pilot.press("p")
+            assert app.diff_change_index == 0
+
+    asyncio.run(exercise())
 
 
 def test_load_diff_view_forwards_root_and_entry_to_git_diff_then_builds(

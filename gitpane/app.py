@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import emoji
+from platformdirs import user_state_path
 
 os.environ.setdefault("TEXTUAL_SMOOTH_SCROLL", "0")
 
@@ -331,18 +332,100 @@ class DiscardScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ShortcutScreen(ModalScreen[None]):
+    """Show the application's keyboard shortcuts."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        ("escape", "close", "Close"),
+        ("h", "close", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        shortcuts = """Mouse controls are supported throughout.
+
+Navigation
+  j / k       Move selection or scroll
+  Enter       Open the selected item
+  1 / 2       Changes / Files tab
+  n / p       Next / previous diff change
+
+File actions
+  Space       Check or uncheck a file
+  s           Stage or unstage the focused file
+  d           Discard the focused unstaged file
+
+Application
+  r           Refresh repository views
+  w           Toggle line wrapping
+  h           Show or close this help
+  q           Quit"""
+        with Center():
+            yield Vertical(
+                Static("Keyboard Shortcuts", id="shortcuts-title"),
+                Static(shortcuts, id="shortcuts-list", markup=False),
+                Button("Close", id="close-shortcuts", variant="primary"),
+                id="shortcuts-dialog",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#close-shortcuts", Button).focus()
+
+    def on_button_pressed(self, _: Button.Pressed) -> None:
+        self.dismiss()
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
+def claim_first_launch(marker_path: Path | None = None) -> bool:
+    """Claim the first launch for this user and return whether it was claimed."""
+    try:
+        marker = marker_path or (
+            user_state_path("gitpane", appauthor=False, ensure_exists=True)
+            / "shortcuts-shown"
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # A read-only home directory should not prevent the application starting.
+        return True
+    try:
+        marker.touch(exist_ok=False)
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 class GitPaneApp(App[None]):
     CSS_PATH = "app.tcss"
     BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("q", "quit", "Quit"),
+        Binding("h", "show_shortcuts", "Help"),
+        Binding("1", "show_changes", "Changes"),
+        Binding("2", "show_files", "Files"),
+        Binding("j", "move_down", "Down"),
+        Binding("k", "move_up", "Up"),
+        Binding("n", "next_change", "Next change"),
+        Binding("p", "previous_change", "Previous change"),
+        Binding("s", "stage_file", "Stage/unstage"),
+        Binding("d", "discard_file", "Discard"),
         Binding("r", "refresh", "Refresh"),
         Binding("space", "toggle_file", "Toggle"),
         Binding("w", "toggle_wrap", "Wrap"),
     ]
 
-    def __init__(self, root: Path, cwd: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        cwd: Path | None = None,
+        *,
+        show_shortcuts: bool = False,
+    ) -> None:
         super().__init__()
         self.root = root
         self.cwd = cwd or root
+        self.show_shortcuts_on_mount = show_shortcuts
         self.selection: DiffEntry | None = None
         self.request_id = 0
         self.status_request_id = 0
@@ -488,6 +571,72 @@ class GitPaneApp(App[None]):
         self.refresh_status()
         self.refresh_history()
         self.refresh_files()
+        if self.show_shortcuts_on_mount:
+            self.push_screen(ShortcutScreen())
+
+    def action_show_shortcuts(self) -> None:
+        self.push_screen(ShortcutScreen())
+
+    def action_show_changes(self) -> None:
+        self.query_one("#main-tabs", TabbedContent).active = "changes-tab"
+        staged = self.query_one("#staged-list", ListView)
+        unstaged = self.query_one("#unstaged-list", ListView)
+        if staged.children:
+            staged.focus()
+        elif unstaged.children:
+            unstaged.focus()
+        else:
+            self.query_one("#commit-tree", Tree).focus()
+
+    def action_show_files(self) -> None:
+        self.query_one("#main-tabs", TabbedContent).active = "files-tab"
+        self.query_one("#files-tree", Tree).focus()
+
+    def action_move_down(self) -> None:
+        self._move_focused(1)
+
+    def action_move_up(self) -> None:
+        self._move_focused(-1)
+
+    def _move_focused(self, offset: int) -> None:
+        """Move the selection or scroll the currently focused view."""
+        focused = self.focused
+        if isinstance(focused, (ListView, Tree)):
+            if offset > 0:
+                focused.action_cursor_down()
+            else:
+                focused.action_cursor_up()
+        elif isinstance(focused, (CodeView, VerticalScroll)):
+            focused.scroll_relative(y=offset, animate=False)
+
+    def action_next_change(self) -> None:
+        if self.query_one("#main-tabs", TabbedContent).active == "changes-tab":
+            self._navigate_diff_change(1)
+
+    def action_previous_change(self) -> None:
+        if self.query_one("#main-tabs", TabbedContent).active == "changes-tab":
+            self._navigate_diff_change(-1)
+
+    def _focused_file(self) -> FileItem | None:
+        """Return the highlighted file when a status list has focus."""
+        focused = self.focused
+        if not isinstance(focused, ListView):
+            return None
+        item = focused.highlighted_child
+        return item if isinstance(item, FileItem) else None
+
+    def action_stage_file(self) -> None:
+        item = self._focused_file()
+        if item is None or item.entry.unsupported_reason is not None:
+            return
+        action = "unstage" if item.entry.side is Side.STAGED else "stage"
+        self.apply_entries(action, [item.entry])
+
+    def action_discard_file(self) -> None:
+        item = self._focused_file()
+        if item is None or item.entry.side is not Side.UNSTAGED:
+            return
+        self.request_discard([item.entry])
 
     def action_refresh(self) -> None:
         """Reload repository views without blocking the event thread."""
@@ -1075,7 +1224,9 @@ class GitPaneApp(App[None]):
 def main() -> None:
     """Run GitPane for the current repository."""
     cwd = Path.cwd()
-    GitPaneApp(git.repo_root(cwd), cwd).run()
+    GitPaneApp(
+        git.repo_root(cwd), cwd, show_shortcuts=claim_first_launch()
+    ).run()
 
 
 if __name__ == "__main__":

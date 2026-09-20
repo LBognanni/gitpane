@@ -48,12 +48,22 @@ lines scroll horizontally.
 | Up/Down | Move through the focused file list |
 | Enter or click a file | Load its diff |
 | Enter or click a commit | Expand its changed files |
+| `j` / `k` | Move the selection or scroll the focused viewer |
+| `1` / `2` | Switch to the Changes / Files tab |
+| `n` / `p` | Move to the next / previous change in a diff |
 | Space or click `[ ]` | Check or uncheck the focused file for a bulk action |
+| `s` | Stage or unstage the focused file |
+| `d` | Discard the focused unstaged file after confirmation |
 | Hover a file and click `↑` / `↓` | Stage or unstage that file |
 | Hover an unstaged file and click `↶` | Discard its changes after confirmation |
 | Section-header actions | Stage, unstage, or discard all checked files |
 | Drag a divider | Resize the Changes sidebar or its sections |
 | `r` | Refresh repository status and files |
+| `w` | Toggle line wrapping in the active viewer |
+| `h` | Show the keyboard shortcut popup |
+| `q` | Quit GitPane |
+
+Mouse controls are supported throughout the interface.
 
 Use the Changes and Files tabs (or Textual's normal tab navigation) to switch
 between repository changes and the filesystem browser. Refresh reloads both.
