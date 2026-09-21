@@ -388,6 +388,7 @@ def test_superseded_automatic_apply_does_not_reset_failure_streak(
             await wait(fake_git.started[1])
             assert app.auto_refresh_task is not None
             await app.auto_refresh_task
+            await pilot.pause()  # notify() posts a message; let the app process it
             assert len(app._notifications) == 1
 
             queue.put_nowait(EDIT)
@@ -667,7 +668,10 @@ def test_changed_status_keeps_restored_highlight_visible_in_scrolled_list(
             await app.workers.wait_for_complete()
             unstaged = app.query_one("#unstaged-list", ListView)
             unstaged.index = 30
-            await pilot.pause()
+            for _ in range(50):  # scroll-to-highlight lands after layout
+                await pilot.pause()
+                if unstaged.scroll_y > 0:
+                    break
             assert unstaged.scroll_y > 0
 
             repo.unstaged = repo.unstaged[10:]
