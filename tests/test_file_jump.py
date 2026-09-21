@@ -6,6 +6,7 @@ from textual.widgets import Input, OptionList, TabbedContent, Tree
 
 from gitpane.app import FileJumpScreen, GitPaneApp, matching_files
 from gitpane.model import RepoState
+from gitpane.widgets import CodeView
 
 
 def test_matching_files_requires_three_characters_and_matches_case_insensitively() -> (
@@ -53,7 +54,6 @@ def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
     nested.parent.mkdir(parents=True)
     nested.write_text("answer = 42\n")
     file_calls: list[Path] = []
-    preview_calls: list[tuple[Path, int]] = []
 
     monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
@@ -63,11 +63,6 @@ def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
         return ["README.md", str(summary), str(summer)]
 
     monkeypatch.setattr("gitpane.app.git.files", fake_files)
-    monkeypatch.setattr(
-        GitPaneApp,
-        "load_preview",
-        lambda _self, path, token: preview_calls.append((path, token)),
-    )
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
@@ -123,7 +118,12 @@ def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
             assert tree.has_focus
             assert src.is_expanded
             assert reports.is_expanded
-            assert preview_calls == [(nested, app.preview_request_id)]
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            preview = app.query_one("#preview-view", CodeView)
+            assert "answer = 42" in "\n".join(
+                preview.render_line(y).text for y in range(preview.size.height)
+            )
             assert file_calls == [tmp_path]
 
             await pilot.press("t")

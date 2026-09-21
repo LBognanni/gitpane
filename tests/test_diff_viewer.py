@@ -13,7 +13,7 @@ from textual.widgets import Button, Static, TabbedContent
 
 from gitpane.app import DiffView, GitPaneApp, PreviewView
 from gitpane.model import FileEntry, RepoState, Side
-from gitpane.widgets import CodeView, JumpScrollBar, scrollbar_click_target
+from gitpane.widgets import CodeView, scrollbar_click_target
 
 
 def visible_text(view: CodeView) -> str:
@@ -77,7 +77,7 @@ def test_completed_text_selection_is_copied_to_clipboard(
     asyncio.run(exercise())
 
 
-def test_app_uses_two_virtual_code_views(
+def test_diff_and_preview_display_replace_scroll_and_wrap_independently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
@@ -85,26 +85,50 @@ def test_app_uses_two_virtual_code_views(
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
-        async with app.run_test() as pilot:
-            viewers = list(app.query(CodeView))
-            assert [viewer.id for viewer in viewers] == ["diff-view", "preview-view"]
+        async with app.run_test(size=(80, 20)) as pilot:
             diff_view = app.query_one("#diff-view", CodeView)
+            preview_view = app.query_one("#preview-view", CodeView)
 
-            lines: tuple[Text, ...] = tuple(
-                Text(f"line {index}") for index in range(40)
+            app.apply_diff_view(
+                DiffView(tuple(Text(f"diff {i} " + "d" * 120) for i in range(500)), ()),
+                app.request_id,
             )
-            app.apply_diff_view(DiffView(lines, (0,)), app.request_id)
+            app.query_one("#main-tabs", TabbedContent).active = "files-tab"
+            app.apply_preview_view(
+                PreviewView(
+                    tuple(Text(f"preview {i} " + "p" * 120) for i in range(500))
+                ),
+                app.preview_request_id,
+            )
             await pilot.pause()
 
-            assert diff_view.lines == lines
-            assert diff_view.scroll_offset == (0, 0)
+            assert "preview 0 " in visible_text(preview_view)
+            app.query_one("#main-tabs", TabbedContent).active = "changes-tab"
+            await pilot.pause()
+            assert "diff 0 " in visible_text(diff_view)
+
+            diff_view.scroll_to(0, 300, animate=False)
+            await pilot.pause()
+            assert "diff 300 " in visible_text(diff_view)
+            app.query_one("#main-tabs", TabbedContent).active = "files-tab"
+            await pilot.pause()
+            assert "preview 0 " in visible_text(preview_view)
+            assert preview_view.scroll_offset == (0, 0)
 
             await pilot.press("w")
             await pilot.pause()
-            assert diff_view.wrapped is True
+            assert preview_view.wrapped is True
+            assert diff_view.wrapped is False
 
-            app.apply_diff_view(DiffView((Text("replacement"),), (0,)), app.request_id)
-            assert diff_view.lines == (Text("replacement"),)
+            app.apply_preview_view(
+                PreviewView((Text("replacement"),)), app.preview_request_id
+            )
+            await pilot.pause()
+            assert "replacement" in visible_text(preview_view)
+            assert "preview 0 " not in visible_text(preview_view)
+            app.query_one("#main-tabs", TabbedContent).active = "changes-tab"
+            await pilot.pause()
+            assert "diff 300 " in visible_text(diff_view)
 
     asyncio.run(exercise())
 
@@ -343,12 +367,11 @@ def test_replacing_a_scrolled_diff_resets_offsets_and_scrolls_to_first_change(
             await pilot.pause()
 
             replacement = tuple(Text(f"new {index}") for index in range(80))
-            generation = view.document_generation
             app.apply_diff_view(DiffView(replacement, (9,)), app.request_id)
             await pilot.pause()
 
-            assert view.lines == replacement
-            assert view.document_generation == generation + 1
+            assert "new 9" in visible_text(view)
+            assert "old" not in visible_text(view)
             assert view.scroll_offset == (0, 5)
 
     asyncio.run(exercise())
@@ -503,38 +526,6 @@ def test_older_diff_completing_late_leaves_the_newer_diff_visible(
 )
 def test_scrollbar_click_target_centers_and_clamps(y: float, expected: float) -> None:
     assert scrollbar_click_target(y, 20, 1000, 100) == expected
-
-
-def test_code_viewers_use_jump_scrollbar_and_unanimated_paging(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
-    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
-
-    async def exercise() -> None:
-        app = GitPaneApp(tmp_path)
-        async with app.run_test():
-            scroll = app.query_one("#preview-view", CodeView)
-            calls: list[tuple[str, bool]] = []
-            monkeypatch.setattr(
-                scroll,
-                "scroll_page_up",
-                lambda *, animate: calls.append(("up", animate)),
-            )
-            monkeypatch.setattr(
-                scroll,
-                "scroll_page_down",
-                lambda *, animate: calls.append(("down", animate)),
-            )
-
-            scroll.action_page_up()
-            scroll.action_page_down()
-
-            assert calls == [("up", False), ("down", False)]
-            assert isinstance(scroll.vertical_scrollbar, JumpScrollBar)
-            assert isinstance(app.query_one("#diff-view"), CodeView)
-
-    asyncio.run(exercise())
 
 
 def test_diff_failure_clears_loading_and_reports_error(

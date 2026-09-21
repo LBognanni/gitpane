@@ -14,6 +14,7 @@ from gitpane.app import (
     format_commit_label,
 )
 from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
+from gitpane.widgets import CodeView
 
 
 @pytest.mark.parametrize(
@@ -243,7 +244,6 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
 ) -> None:
     commit = Commit("full-hash", "abc1234", "parent-hash", "Add history")
     entry = CommitFile("[bold]report.txt", "M", commit.hash, commit.parent)
-    requested: list[tuple[CommitFile, int]] = []
 
     monkeypatch.setattr(
         "gitpane.app.git.status",
@@ -255,9 +255,12 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
     monkeypatch.setattr("gitpane.app.git.commit_files", lambda _root, _commit: [entry])
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
     monkeypatch.setattr(
-        GitPaneApp,
-        "load_diff",
-        lambda _self, selected, token: requested.append((selected, token)),
+        "gitpane.app.git.diff",
+        lambda _root, _entry: (
+            "diff --git a/report.txt b/report.txt\n--- a/report.txt\n"
+            "+++ b/report.txt\n@@ -1,2 +1,2 @@\n context line\n"
+            "-old report text\n+new report text\n"
+        ),
     )
 
     async def exercise() -> None:
@@ -297,11 +300,19 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             tree.select_node(file_node)
             await pilot.pause()
 
-            assert requested == [(entry, app.request_id)]
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
             assert app.selection == entry
             diff_title = app.query_one("#diff-title", Static).render()
             assert isinstance(diff_title, Content)
             assert diff_title.plain == entry.path
             assert diff_title.spans == []
+            diff_view = app.query_one("#diff-view", CodeView)
+            displayed = "\n".join(
+                diff_view.render_line(y).text for y in range(diff_view.size.height)
+            )
+            assert "new report text" in displayed
+            assert "old report text" in displayed
 
     asyncio.run(exercise())
