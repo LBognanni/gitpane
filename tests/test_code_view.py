@@ -4,7 +4,8 @@ import pytest
 from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.geometry import Size
+from textual.geometry import Offset, Size
+from textual.selection import Selection
 from textual.strip import Strip
 
 from gitpane.widgets import CodeView, JumpScrollBar, scrollbar_click_target
@@ -124,6 +125,12 @@ def test_wide_unicode_uses_cell_width_and_crops_by_cells() -> None:
 
             assert view.scroll_x == 1
             assert view.render_line(0).text == "界b"
+
+            view.scroll_to(x=2, animate=False)
+            await pilot.pause()
+            segments = list(view.render_line(0))
+            assert segments[0].style is not None
+            assert segments[0].style.meta["offset"] == (1, 0)
 
     asyncio.run(exercise())
 
@@ -275,3 +282,138 @@ def test_page_actions_are_unanimated(monkeypatch: pytest.MonkeyPatch) -> None:
     view.action_page_down()
 
     assert calls == [("up", False), ("down", False)]
+
+
+def test_wrapping_maps_source_rows_and_preserves_progress() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(10, 4)) as pilot:
+            view = app.query_one(CodeView)
+            view.set_document(tuple(Text(f"{row} " + "x" * 20) for row in range(20)))
+            await pilot.pause()
+            view.scroll_to(5, view.max_scroll_y / 2, animate=False)
+            await pilot.pause()
+            progress = view.scroll_y / view.max_scroll_y
+
+            view.set_wrapped(True)
+            await pilot.pause()
+
+            assert view.scroll_x == 0
+            assert view.source_to_visual_row(3) > 3
+            assert view.scroll_y / view.max_scroll_y == pytest.approx(
+                progress, abs=1 / view.max_scroll_y
+            )
+
+    asyncio.run(exercise())
+
+
+def test_selection_uses_displayed_expanded_text_and_replacement_clears_it() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(20, 4)):
+            view = app.query_one(CodeView)
+            view.set_document((Text(" 1 a\tb"), Text(" 2 second")))
+            selection = Selection(Offset(0, 0), Offset(9, 0))
+            assert view.get_selection(selection) == (" 1 a    b", "\n")
+
+            app.screen.selections = {view: selection}
+            view.set_document((Text("replacement"),))
+
+            assert app.screen.selections == {}
+
+    asyncio.run(exercise())
+
+
+def test_selection_handles_a_trailing_blank_line() -> None:
+    view = CodeView()
+    view.set_document((Text("first"), Text("")))
+
+    assert view.get_selection(Selection(Offset(0, 0), Offset(0, 1))) == (
+        "first\n",
+        "\n",
+    )
+    assert view.get_selection(Selection(Offset(0, 1), Offset(0, 1))) == ("", "\n")
+
+
+def test_selection_background_preserves_document_foreground() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(20, 4)):
+            view = app.query_one(CodeView)
+            view.set_document((Text("visible", style="red"),))
+            app.screen.selections = {view: Selection(Offset(0, 0), Offset(7, 0))}
+
+            style = next(iter(view.render_line(0))).style
+            assert style is not None
+            assert style.color == Style(color="red").color
+            assert style.bgcolor is not None
+
+    asyncio.run(exercise())
+
+
+def test_wrapped_selection_uses_source_text_without_visual_newlines() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(7, 4)) as pilot:
+            view = app.query_one(CodeView)
+            view.set_document((Text("abc   def"), Text("second")))
+            view.set_wrapped(True)
+            await pilot.pause()
+
+            assert view.virtual_size.height > len(view.lines)
+            selection = Selection(Offset(0, 0), Offset(3, 1))
+            assert view.get_selection(selection) == ("abc   def\nsec", "\n")
+
+            first_continuation = view.source_to_visual_row(0) + 1
+            strip = view.render_line(first_continuation)
+            assert strip.text.startswith("def")
+            first_segment = next(iter(strip))
+            assert first_segment.style is not None
+            assert first_segment.style.meta["offset"] == (6, 0)
+
+    asyncio.run(exercise())
+
+
+def test_wrapped_document_indents_continuations_without_a_gutter_only_row() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(9, 5)) as pilot:
+            view = app.query_one(CodeView)
+            view.set_document((Text(" 1 abcdefghijklmno"),), wrap_indent=3)
+            view.set_wrapped(True)
+            await pilot.pause()
+
+            rendered = [line.plain for line in view._visual_lines]
+            assert rendered[0].startswith(" 1 abc")
+            assert all(line.startswith("   ") for line in rendered[1:])
+            assert all(line.strip() for line in rendered)
+
+    asyncio.run(exercise())
+
+
+def test_wrapped_resize_preserves_source_row_and_selection() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(16, 4)) as pilot:
+            view = app.query_one(CodeView)
+            lines = (Text("short"), Text("x" * 50), Text("target"), Text("y" * 50))
+            view.set_document(lines)
+            view.set_wrapped(True)
+            await pilot.pause()
+            old_row = view.source_to_visual_row(1) + 2
+            view.scroll_to(y=old_row, animate=False)
+            old_offset = view._visual_source_offsets[old_row]
+            app.screen.selections = {view: Selection(Offset(0, 2), Offset(3, 2))}
+
+            await pilot.resize_terminal(10, 4)
+
+            assert view._visual_source_rows[int(view.scroll_y)] == 1
+            assert view._visual_source_offsets[int(view.scroll_y)] <= old_offset
+            next_row = int(view.scroll_y) + 1
+            if view._visual_source_rows[next_row] == 1:
+                assert view._visual_source_offsets[next_row] > old_offset
+            assert app.screen.selections == {
+                view: Selection(Offset(0, 2), Offset(3, 2))
+            }
+
+    asyncio.run(exercise())

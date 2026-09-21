@@ -19,7 +19,7 @@ from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Center, Horizontal, Vertical, VerticalScroll
+from textual.containers import Center, Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -36,7 +36,7 @@ from textual.widgets.tree import TreeNode
 from gitpane import diff, git, icons
 from gitpane.diff import Row
 from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
-from gitpane.widgets import CodeScroll, CodeView, HorizontalSplitter, VerticalSplitter
+from gitpane.widgets import CodeView, HorizontalSplitter, VerticalSplitter
 from gitpane.widgets import JumpScrollBar as _JumpScrollBar
 from gitpane.widgets import scrollbar_click_target as _scrollbar_click_target
 
@@ -76,9 +76,10 @@ class DiffView:
 
 @dataclass(frozen=True)
 class PreviewView:
-    """A ready-to-render file preview or friendly error message."""
+    """Prepared, ready-to-render preview lines."""
 
-    content: Syntax | Text
+    lines: tuple[Text, ...]
+    wrap_indent: int = 0
 
 
 MAX_PREVIEW_BYTES = 1024 * 1024
@@ -101,30 +102,45 @@ def load_diff_view(root: Path, entry: DiffEntry) -> DiffView:
 
 def load_preview_view(path: Path) -> PreviewView:
     """Read and prepare a bounded UTF-8 text file preview."""
+
+    def message(text: str) -> PreviewView:
+        return PreviewView((Text(text),))
+
     try:
         file_stat = path.lstat()
         if not stat.S_ISREG(file_stat.st_mode):
-            return PreviewView(Text("Only regular files can be previewed."))
+            return message("Only regular files can be previewed.")
         if file_stat.st_size > MAX_PREVIEW_BYTES:
-            return PreviewView(Text("File is too large to preview (maximum 1 MiB)."))
+            return message("File is too large to preview (maximum 1 MiB).")
         with path.open("rb") as file:
             data = file.read(MAX_PREVIEW_BYTES + 1)
     except FileNotFoundError:
-        return PreviewView(Text("File is no longer available."))
+        return message("File is no longer available.")
     except OSError:
-        return PreviewView(Text("File could not be read."))
+        return message("File could not be read.")
 
     if len(data) > MAX_PREVIEW_BYTES:
-        return PreviewView(Text("File is too large to preview (maximum 1 MiB)."))
+        return message("File is too large to preview (maximum 1 MiB).")
     if b"\0" in data:
-        return PreviewView(Text("Binary files cannot be previewed."))
+        return message("Binary files cannot be previewed.")
     try:
         source = data.decode("utf-8")
     except UnicodeDecodeError:
-        return PreviewView(Text("File is not valid UTF-8."))
+        return message("File is not valid UTF-8.")
 
+    source = source.replace("\r\n", "\n").replace("\r", "\n")
     lexer = Syntax.guess_lexer(path.name, source)
-    return PreviewView(Syntax(source, lexer, line_numbers=True, word_wrap=False))
+    syntax = Syntax(source, lexer)
+    highlighted = list(syntax.highlight(source).split("\n", allow_blank=True))
+    line_count = source.count("\n") + 1
+    highlighted = highlighted[:line_count]
+    number_width = len(str(len(highlighted)))
+    lines: list[Text] = []
+    for number, highlighted_line in enumerate(highlighted, 1):
+        line = Text(f" {number:>{number_width}} ", style="dim")
+        line.append_text(highlighted_line)
+        lines.append(line)
+    return PreviewView(tuple(lines), number_width + 2)
 
 
 def is_current_request(token: int, current: int) -> bool:
@@ -202,16 +218,6 @@ def render_diff_rows(entry: DiffEntry, rows: list[Row]) -> tuple[Text, ...]:
         lines.append(line)
 
     return tuple(lines)
-
-
-def join_diff_lines(lines: Sequence[Text]) -> Text:
-    """Join prepared diff lines for the temporary Static display fallback."""
-    text = Text()
-    for index, line in enumerate(lines):
-        if index:
-            text.append("\n")
-        text.append_text(line)
-    return text
 
 
 class FileItem(ListItem):
@@ -550,7 +556,6 @@ class GitPaneApp(App[None]):
                             classes="viewer-title",
                         ),
                         CodeView(id="diff-view"),
-                        CodeScroll(Static(id="diff"), id="diff-scroll"),
                         id="diff-pane",
                     ),
                     id="body",
@@ -559,8 +564,10 @@ class GitPaneApp(App[None]):
                 yield Horizontal(
                     files_tree,
                     Vertical(
-                        Static(id="preview-title", classes="viewer-title", markup=False),
-                        CodeScroll(Static(id="preview"), id="preview-scroll"),
+                        Static(
+                            id="preview-title", classes="viewer-title", markup=False
+                        ),
+                        CodeView(id="preview-view"),
                         id="preview-pane",
                     ),
                     id="files-body",
@@ -606,7 +613,7 @@ class GitPaneApp(App[None]):
                 focused.action_cursor_down()
             else:
                 focused.action_cursor_up()
-        elif isinstance(focused, (CodeView, VerticalScroll)):
+        elif isinstance(focused, CodeView):
             focused.scroll_relative(y=offset, animate=False)
 
     def action_next_change(self) -> None:
@@ -658,87 +665,15 @@ class GitPaneApp(App[None]):
         active_tab = self.query_one("#main-tabs", TabbedContent).active
         if active_tab == "changes-tab":
             self.diff_wrapped = not self.diff_wrapped
-            self._set_diff_wrapped(self.diff_wrapped)
+            self.query_one("#diff-view", CodeView).set_wrapped(self.diff_wrapped)
         elif active_tab == "files-tab":
             self.preview_wrapped = not self.preview_wrapped
-            self._set_wrapped("#preview", "#preview-scroll", self.preview_wrapped)
+            self.query_one("#preview-view", CodeView).set_wrapped(self.preview_wrapped)
 
-    def _active_diff_widget(self) -> CodeView | CodeScroll:
-        """Return the visible diff viewer."""
-        if self.diff_wrapped:
-            return self.query_one("#diff-scroll", CodeScroll)
-        return self.query_one("#diff-view", CodeView)
-
-    def _set_diff_wrapped(self, wrapped: bool) -> None:
-        """Switch diff renderers while retaining relative vertical progress."""
-        source = (
-            self.query_one("#diff-view", CodeView)
-            if wrapped
-            else self.query_one("#diff-scroll", CodeScroll)
-        )
-        progress = source.scroll_y / source.max_scroll_y if source.max_scroll_y else 0
-        loading = source.loading
-        view = self.query_one("#diff-view", CodeView)
-        scroll = self.query_one("#diff-scroll", CodeScroll)
-        content = self.query_one("#diff", Static)
-
-        if wrapped:
-            if self.diff_view is not None:
-                content.update(join_diff_lines(self.diff_view.lines))
-            view.set_class(True, "wrapped")
-            scroll.set_class(True, "wrapped")
-            content.set_class(True, "wrapped")
-            scroll.scroll_to(0, 0, animate=False)
-            destination: CodeView | CodeScroll = scroll
-        else:
-            if self.diff_view is not None:
-                view.set_document(self.diff_view.lines)
-            else:
-                view.set_document(())
-            content.update("")
-            view.set_class(False, "wrapped")
-            scroll.set_class(False, "wrapped")
-            content.set_class(False, "wrapped")
-            destination = view
-
-        source.loading = False
-        destination.loading = loading
-        self.call_after_refresh(
-            self._restore_diff_scroll_progress, destination, progress
-        )
-
-    def _restore_diff_scroll_progress(
-        self, viewer: CodeView | CodeScroll, progress: float
-    ) -> None:
-        """Restore vertical progress after a diff renderer has laid out."""
-        viewer.scroll_to(None, progress * viewer.max_scroll_y, animate=False)
-
-    def _set_wrapped(
-        self, content_selector: str, scroll_selector: str, wrapped: bool
-    ) -> None:
-        content = self.query_one(content_selector, Static)
-        scroll = self.query_one(scroll_selector, VerticalScroll)
-        progress = scroll.scroll_y / scroll.max_scroll_y if scroll.max_scroll_y else 0
-
-        content.set_class(wrapped, "wrapped")
-        scroll.set_class(wrapped, "wrapped")
-        if isinstance(content.content, Syntax):
-            content.content.word_wrap = wrapped
-            content.update(content.content)
-
-        self.call_after_refresh(
-            self._restore_scroll_progress, scroll, progress, wrapped
-        )
-
-    def _restore_scroll_progress(
-        self, scroll: VerticalScroll, progress: float, wrapped: bool
-    ) -> None:
-        """Restore the relative vertical position after content reflows."""
-        scroll.scroll_to(
-            0 if wrapped else None,
-            progress * scroll.max_scroll_y,
-            animate=False,
-        )
+    def on_text_selected(self, _: events.TextSelected) -> None:
+        """Copy completed text selections to the terminal clipboard."""
+        if selected := self.screen.get_selected_text():
+            self.copy_to_clipboard(selected)
 
     def refresh_status(self) -> None:
         """Request a working-tree status refresh."""
@@ -775,7 +710,6 @@ class GitPaneApp(App[None]):
         self.query_one("#staged-list", ListView).loading = False
         self.query_one("#unstaged-list", ListView).loading = False
         self.query_one("#diff-view", CodeView).loading = False
-        self.query_one("#diff-scroll", CodeScroll).loading = False
         self._show_git_error("refresh status", error)
 
     async def apply_status(self, state: RepoState, token: int) -> None:
@@ -886,7 +820,7 @@ class GitPaneApp(App[None]):
         if not is_current_request(token, self.files_request_id):
             return
         self.query_one("#files-tree", Tree).loading = False
-        self.query_one("#preview-scroll", VerticalScroll).loading = False
+        self.query_one("#preview-view", CodeView).loading = False
         self._show_git_error("refresh files", error)
 
     def apply_files(self, files: list[Path], token: int) -> None:
@@ -913,16 +847,13 @@ class GitPaneApp(App[None]):
         for path in files:
             parts = path.parts
             parent_parts = parts[:-1]
-            nodes[parent_parts].add_leaf(
-                icons.file_label(parts[-1]), self.cwd / path
-            )
+            nodes[parent_parts].add_leaf(icons.file_label(parts[-1]), self.cwd / path)
 
-        preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
+        preview = self.query_one("#preview-view", CodeView)
         tree.loading = False
         self.query_one("#preview-title", Static).update("")
-        self.query_one("#preview", Static).update("")
-        preview_scroll.loading = False
-        preview_scroll.scroll_to(0, 0, animate=False)
+        preview.set_document(())
+        preview.loading = False
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Start loading the diff for a selected file entry."""
@@ -942,7 +873,7 @@ class GitPaneApp(App[None]):
                 DiffView((Text(entry.unsupported_reason),), ()), self.request_id
             )
             return
-        self._active_diff_widget().loading = True
+        self.query_one("#diff-view", CodeView).loading = True
         self.load_diff(entry, self.request_id)
 
     @work(thread=True, exclusive=True, group="diff")
@@ -962,7 +893,6 @@ class GitPaneApp(App[None]):
         if not is_current_request(token, self.request_id):
             return
         self.query_one("#diff-view", CodeView).loading = False
-        self.query_one("#diff-scroll", CodeScroll).loading = False
         self._show_git_error("load diff", error)
 
     def apply_diff_view(self, view: DiffView, token: int) -> None:
@@ -973,30 +903,21 @@ class GitPaneApp(App[None]):
         self.diff_view = view
         self.diff_change_index = 0 if view.changes else None
         self._update_diff_navigation()
-        viewer = self._active_diff_widget()
-        if self.diff_wrapped:
-            self.query_one("#diff", Static).update(join_diff_lines(view.lines))
-        else:
-            self.query_one("#diff-view", CodeView).set_document(view.lines)
-        self.query_one("#diff-view", CodeView).loading = False
-        self.query_one("#diff-scroll", CodeScroll).loading = False
+        viewer = self.query_one("#diff-view", CodeView)
+        viewer.set_document(view.lines)
+        viewer.loading = False
         viewer.scroll_to(0, 0, animate=False)
         if view.first_change is not None:
             self.call_after_refresh(self._scroll_to_diff_change, 0)
 
     def _clear_diff(self) -> None:
-        """Clear both diff renderers and discard the accepted document."""
+        """Clear the diff viewer and discard the accepted document."""
         self.diff_view = None
         self.diff_change_index = None
         self._update_diff_navigation()
         view = self.query_one("#diff-view", CodeView)
-        scroll = self.query_one("#diff-scroll", CodeScroll)
         view.set_document(())
-        self.query_one("#diff", Static).update("")
         view.loading = False
-        scroll.loading = False
-        view.scroll_to(0, 0, animate=False)
-        scroll.scroll_to(0, 0, animate=False)
 
     def on_tree_node_selected(self, event: Tree.NodeSelected[object]) -> None:
         """Handle commit expansion, historical diffs, and file previews."""
@@ -1008,8 +929,7 @@ class GitPaneApp(App[None]):
             self.query_one("#preview-title", Static).update(
                 str(data.relative_to(self.root))
             )
-            preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
-            preview_scroll.loading = True
+            self.query_one("#preview-view", CodeView).loading = True
             self.load_preview(data, self.preview_request_id)
             return
         if isinstance(data, Commit):
@@ -1085,12 +1005,9 @@ class GitPaneApp(App[None]):
         """Apply a preview only if it is still the newest request."""
         if not is_current_request(token, self.preview_request_id):
             return
-        if isinstance(view.content, Syntax):
-            view.content.word_wrap = self.preview_wrapped
-        self.query_one("#preview", Static).update(view.content)
-        preview_scroll = self.query_one("#preview-scroll", VerticalScroll)
-        preview_scroll.loading = False
-        preview_scroll.scroll_to(0, 0, animate=False)
+        preview = self.query_one("#preview-view", CodeView)
+        preview.set_document(view.lines, wrap_indent=view.wrap_indent)
+        preview.loading = False
 
     def on_file_item_selection_changed(self, _: FileItem.SelectionChanged) -> None:
         self._update_bulk_actions()
@@ -1130,11 +1047,8 @@ class GitPaneApp(App[None]):
         if self.diff_view is None:
             return
         row = max(0, self.diff_view.changes[index] - DIFF_CONTEXT_LINES)
-        if self.diff_wrapped:
-            content = self.query_one("#diff", Static)
-            prefix = join_diff_lines(self.diff_view.lines[:row])
-            row = len(prefix.wrap(self.console, max(1, content.size.width)))
-        self._active_diff_widget().scroll_to(0, row, animate=False)
+        viewer = self.query_one("#diff-view", CodeView)
+        viewer.scroll_to(0, viewer.source_to_visual_row(row), animate=False)
 
     def _update_diff_navigation(self) -> None:
         """Enable navigation buttons when an adjacent change exists."""
@@ -1171,9 +1085,7 @@ class GitPaneApp(App[None]):
         self.mutate_entries(action, tuple(entries))
 
     @work(group="mutations")
-    async def mutate_entries(
-        self, action: str, entries: tuple[FileEntry, ...]
-    ) -> None:
+    async def mutate_entries(self, action: str, entries: tuple[FileEntry, ...]) -> None:
         """Run one mutation at a time without blocking the event thread."""
         paths = [entry.path for entry in entries]
         async with self.mutation_lock:
@@ -1221,12 +1133,11 @@ class GitPaneApp(App[None]):
             severity="error",
         )
 
+
 def main() -> None:
     """Run GitPane for the current repository."""
     cwd = Path.cwd()
-    GitPaneApp(
-        git.repo_root(cwd), cwd, show_shortcuts=claim_first_launch()
-    ).run()
+    GitPaneApp(git.repo_root(cwd), cwd, show_shortcuts=claim_first_launch()).run()
 
 
 if __name__ == "__main__":

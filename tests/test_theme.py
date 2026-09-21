@@ -114,22 +114,13 @@ def test_renderer_diff_backgrounds_match_tcss(kind: str, variable: str) -> None:
             ("background: $surface", "color: $text", "border: solid $border"),
         ),
         (
-            "#diff-scroll",
+            "#diff-view,\n#preview-view",
             (
                 "background: $diff-background",
                 "color: $text",
                 "scrollbar-color: $accent",
             ),
         ),
-        (
-            "#diff-view",
-            (
-                "background: $diff-background",
-                "color: $text",
-                "scrollbar-color: $accent",
-            ),
-        ),
-        ("#diff", ("background: $diff-background", "color: $text")),
     ],
 )
 def test_surface_rules_use_the_locked_palette(
@@ -138,6 +129,13 @@ def test_surface_rules_use_the_locked_palette(
     rule = _rule(_stylesheet(), selector)
     for declaration in declarations:
         assert _has_declaration(rule, declaration)
+
+
+def test_text_selection_has_readable_foreground_and_background() -> None:
+    rule = _rule(_stylesheet(), "Screen > .screen--selection")
+
+    assert _has_declaration(rule, "background: $focused-selection")
+    assert _has_declaration(rule, "color: $text")
 
 
 def test_list_states_have_the_locked_hierarchy() -> None:
@@ -190,16 +188,12 @@ def test_diff_title_reserves_space_for_right_aligned_navigation() -> None:
     )
 
 
-def test_layout_and_diff_scroll_contracts_are_retained() -> None:
+def test_layout_and_code_view_contracts_are_retained() -> None:
     stylesheet = _stylesheet()
     sidebar = _rule(stylesheet, "#sidebar")
     lists = _rule(stylesheet, "#staged-list,\n#unstaged-list,\n#commit-tree")
-    diff_view = _rule(stylesheet, "#diff-view")
-    diff_scroll = _rule(stylesheet, "#diff-scroll")
-    diff = _rule(stylesheet, "#diff")
-    wrapped_diff_scroll = _rule(stylesheet, "#diff-scroll.wrapped")
-    wrapped_diff_view = _rule(stylesheet, "#diff-view.wrapped")
-    wrapped_preview_scroll = _rule(stylesheet, "#preview-scroll.wrapped")
+    code_views = _rule(stylesheet, "#diff-view,\n#preview-view")
+    wrapped_views = _rule(stylesheet, "#diff-view.wrapped,\n#preview-view.wrapped")
 
     assert _has_declaration(_rule(stylesheet, "#body"), "height: 1fr")
     assert _has_declaration(sidebar, "width: 30")
@@ -207,18 +201,9 @@ def test_layout_and_diff_scroll_contracts_are_retained() -> None:
     assert not _has_declaration(sidebar, "max-width: 30")
     assert _has_declaration(_rule(stylesheet, ".sidebar-section"), "height: 1fr")
     assert _has_declaration(lists, "height: 1fr")
-    assert _has_declaration(diff_view, "overflow: scroll scroll")
-    assert _has_declaration(diff_view, "scrollbar-color: $accent")
-    assert _has_declaration(diff_scroll, "display: none")
-    assert _has_declaration(diff_scroll, "overflow: scroll scroll")
-    assert _has_declaration(wrapped_diff_scroll, "display: block")
-    assert _has_declaration(wrapped_diff_scroll, "overflow-x: hidden")
-    assert _has_declaration(wrapped_diff_view, "display: none")
-    assert _has_declaration(wrapped_preview_scroll, "overflow-x: hidden")
-    assert _has_declaration(diff, "width: auto")
-    assert _has_declaration(diff, "text-wrap: nowrap")
-    assert not re.search(r"^\s*padding:\s*(?!0\s+1;).+;$", diff, re.MULTILINE)
-    assert not re.search(r"^\s*padding-(?:top|bottom):", diff, re.MULTILINE)
+    assert _has_declaration(code_views, "overflow: scroll scroll")
+    assert _has_declaration(code_views, "scrollbar-color: $accent")
+    assert _has_declaration(wrapped_views, "overflow-x: hidden")
 
 
 @pytest.mark.parametrize(

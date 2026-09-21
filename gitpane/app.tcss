@@ -17,6 +17,11 @@ Screen {
     color: $text;
 }
 
+Screen > .screen--selection {
+    background: $focused-selection;
+    color: $text;
+}
+
 #main-tabs {
     height: 1fr;
 }
@@ -298,7 +303,8 @@ ShortcutScreen {
     align-horizontal: right;
 }
 
-#diff-view {
+#diff-view,
+#preview-view {
     height: 1fr;
     overflow: scroll scroll;
     background: $diff-background;
@@ -306,39 +312,9 @@ ShortcutScreen {
     scrollbar-color: $accent;
 }
 
-#diff-scroll {
-    height: 1fr;
-    display: none;
-    overflow: scroll scroll;
-    background: $diff-background;
-    color: $text;
-    scrollbar-color: $accent;
-}
-
-#diff {
-    width: auto;
-    text-wrap: nowrap;
-    background: $diff-background;
-    color: $text;
-}
-
-#diff-scroll.wrapped {
-    display: block;
+#diff-view.wrapped,
+#preview-view.wrapped {
     overflow-x: hidden;
-}
-
-#preview-scroll.wrapped {
-    overflow-x: hidden;
-}
-
-#diff-view.wrapped {
-    display: none;
-}
-
-#diff.wrapped,
-#preview.wrapped {
-    width: 100%;
-    text-wrap: wrap;
 }
 
 #files-body {
@@ -365,19 +341,4 @@ ShortcutScreen {
     background: $focused-selection;
     color: $text;
     text-style: bold;
-}
-
-#preview-scroll {
-    height: 1fr;
-    overflow: scroll scroll;
-    background: $diff-background;
-    color: $text;
-    scrollbar-color: $accent;
-}
-
-#preview {
-    width: auto;
-    text-wrap: nowrap;
-    background: $diff-background;
-    color: $text;
 }
