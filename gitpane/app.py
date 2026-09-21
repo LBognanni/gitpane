@@ -392,9 +392,7 @@ class FileJumpScreen(ModalScreen[Path | None]):
     async def search_files(self, query: str, token: int) -> None:
         """Match paths off the event loop, coalescing rapid input changes."""
         await asyncio.sleep(0.03)
-        matches, truncated = await asyncio.to_thread(
-            matching_files, self.files, query
-        )
+        matches, truncated = await asyncio.to_thread(matching_files, self.files, query)
         self._apply_matches(matches, truncated, token)
 
     def _apply_matches(
@@ -407,8 +405,7 @@ class FileJumpScreen(ModalScreen[Path | None]):
         results = self.query_one("#file-jump-results", OptionList)
         results.clear_options()
         results.add_options(
-            Option(str(path), id=str(index))
-            for index, path in enumerate(self.matches)
+            Option(str(path), id=str(index)) for index, path in enumerate(self.matches)
         )
         results.display = bool(self.matches)
         results.styles.height = "auto"
