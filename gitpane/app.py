@@ -1,7 +1,7 @@
 import asyncio
 import os
 import subprocess
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import ClassVar
 
@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, ListView, Static, TabbedContent, TabPane, Tree
 from textual.widgets.tree import TreeNode
 
-from gitpane import git
+from gitpane import git, watcher
 from gitpane.diff_view import DiffEntry
 from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
 from gitpane.screens.discard import DiscardScreen
@@ -75,8 +75,14 @@ class GitPaneApp(App[None]):
         cwd: Path | None = None,
         *,
         show_shortcuts: bool = False,
+        watch_source: Callable[[Path], AsyncIterator[watcher.Invalidation]]
+        | None = None,
     ) -> None:
         super().__init__()
+        self.watch_source = watch_source
+        self.watch_task: asyncio.Task[None] | None = None
+        self.auto_refresh_task: asyncio.Task[None] | None = None
+        self.auto_pending: watcher.Invalidation | None = None
         self.root = root
         self.cwd = cwd or root
         self.show_shortcuts_on_mount = show_shortcuts
@@ -177,8 +183,64 @@ class GitPaneApp(App[None]):
         self.refresh_status()
         self.refresh_history()
         self.refresh_files()
+        if self.watch_source is not None:
+            self.watch_task = asyncio.create_task(
+                self._watch_repository(self.watch_source)
+            )
         if self.show_shortcuts_on_mount:
             self.push_screen(ShortcutScreen())
+
+    async def on_unmount(self) -> None:
+        tasks = [t for t in (self.watch_task, self.auto_refresh_task) if t]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _watch_repository(
+        self, watch: Callable[[Path], AsyncIterator[watcher.Invalidation]]
+    ) -> None:
+        started = False
+        try:
+            async for invalidation in watch(self.root):
+                started = True
+                if not invalidation.status:
+                    continue
+                self._merge_pending(invalidation)
+                if self.auto_refresh_task is None or self.auto_refresh_task.done():
+                    self.auto_refresh_task = asyncio.create_task(
+                        self._run_auto_refresh()
+                    )
+        except OSError:
+            message = (
+                "Automatic refresh stopped. Press r to refresh manually."
+                if started
+                else "Automatic refresh could not start. "
+                "Press r to refresh manually."
+            )
+            self.notify(message, severity="warning")
+
+    async def _run_auto_refresh(self) -> None:
+        """Run one status read at a time, folding events into one follow-up."""
+        while self.auto_pending is not None:
+            invalidation, self.auto_pending = self.auto_pending, None
+            token = self.status_request_id
+            try:
+                state = await self._read_status(token)
+            except (subprocess.SubprocessError, OSError):
+                # Keep the data for the next event's retry instead of spinning.
+                self._merge_pending(invalidation)
+                return
+            if state is None:
+                # Stale: the next pass reads with the newer token.
+                self._merge_pending(invalidation)
+            else:
+                await self.apply_status(state, token, invalidation)
+
+    def _merge_pending(self, invalidation: watcher.Invalidation) -> None:
+        pending = self.auto_pending
+        self.auto_pending = (
+            invalidation if pending is None else pending.merge(invalidation)
+        )
 
     def action_show_shortcuts(self) -> None:
         self.push_screen(ShortcutScreen())
@@ -280,14 +342,19 @@ class GitPaneApp(App[None]):
     @work(group="status")
     async def load_status(self, token: int) -> None:
         try:
-            async with self.mutation_lock:
-                if token != self.status_request_id:
-                    return
-                state = await asyncio.to_thread(git.status, self.root)
+            state = await self._read_status(token)
         except (subprocess.SubprocessError, OSError) as error:
             self.apply_status_error(error, token)
             return
-        await self.apply_status(state, token)
+        if state is not None:
+            await self.apply_status(state, token)
+
+    async def _read_status(self, token: int) -> RepoState | None:
+        """Read status under the mutation lock; None if *token* is stale."""
+        async with self.mutation_lock:
+            if token != self.status_request_id:
+                return None
+            return await asyncio.to_thread(git.status, self.root)
 
     def apply_status_error(
         self, error: subprocess.SubprocessError | OSError, token: int
@@ -299,7 +366,12 @@ class GitPaneApp(App[None]):
         self.diff_pane.stop_loading()
         self._show_git_error("refresh status", error)
 
-    async def apply_status(self, state: RepoState, token: int) -> None:
+    async def apply_status(
+        self,
+        state: RepoState,
+        token: int,
+        invalidation: watcher.Invalidation | None = None,
+    ) -> None:
         async with self.status_apply_lock:
             if token != self.status_request_id:
                 return
@@ -487,9 +559,7 @@ class GitPaneApp(App[None]):
             await self.apply_status(state, token)
 
     def request_discard(self, entries: Sequence[FileEntry]) -> None:
-        selected = tuple(
-            entry for entry in entries if entry.unsupported_reason is None
-        )
+        selected = tuple(entry for entry in entries if entry.unsupported_reason is None)
         if not selected:
             return
 
@@ -511,7 +581,12 @@ class GitPaneApp(App[None]):
 
 def main() -> None:
     cwd = Path.cwd()
-    GitPaneApp(git.repo_root(cwd), cwd, show_shortcuts=claim_first_launch()).run()
+    GitPaneApp(
+        git.repo_root(cwd),
+        cwd,
+        show_shortcuts=claim_first_launch(),
+        watch_source=watcher.watch,
+    ).run()
 
 
 if __name__ == "__main__":
