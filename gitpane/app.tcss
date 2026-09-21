@@ -244,9 +244,14 @@ DiscardScreen {
     background: $canvas 70%;
 }
 
+FileJumpScreen,
 ShortcutScreen {
     align: center middle;
     background: $canvas 70%;
+}
+
+FileJumpScreen {
+    align: center top;
 }
 
 #discard-dialog {
@@ -301,6 +306,26 @@ ShortcutScreen {
 
 #close-shortcuts {
     align-horizontal: right;
+}
+
+#file-jump-dialog {
+    width: 70;
+    max-width: 90%;
+    height: auto;
+    offset: 0 3;
+    background: $raised-surface;
+}
+
+#file-jump-input {
+    border: none;
+    padding: 1 1 0 1;
+}
+
+#file-jump-results {
+    display: none;
+    background: $surface;
+    color: $text;
+    scrollbar-color: $accent;
 }
 
 #diff-view,

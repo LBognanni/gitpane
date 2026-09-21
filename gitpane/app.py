@@ -24,13 +24,16 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Input,
     ListItem,
     ListView,
+    OptionList,
     Static,
     TabbedContent,
     TabPane,
     Tree,
 )
+from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
 
 from gitpane import diff, git, icons
@@ -84,6 +87,7 @@ class PreviewView:
 
 MAX_PREVIEW_BYTES = 1024 * 1024
 DIFF_CONTEXT_LINES = 4
+MAX_FILE_JUMP_RESULTS = 100
 
 
 @functools.lru_cache(maxsize=4)
@@ -338,6 +342,112 @@ class DiscardScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+def matching_files(
+    files: Sequence[tuple[Path, str]], query: str
+) -> tuple[tuple[Path, ...], bool]:
+    """Return bounded, case-insensitive matches from an in-memory file index."""
+    if len(query) < 3:
+        return (), False
+    needle = query.casefold()
+    matches: list[Path] = []
+    for path, searchable_path in files:
+        if needle in searchable_path:
+            matches.append(path)
+            if len(matches) > MAX_FILE_JUMP_RESULTS:
+                break
+    return tuple(matches[:MAX_FILE_JUMP_RESULTS]), len(matches) > MAX_FILE_JUMP_RESULTS
+
+
+class FileJumpScreen(ModalScreen[Path | None]):
+    """Select a repository file from an in-memory path index."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, files: Sequence[tuple[Path, str]]) -> None:
+        super().__init__()
+        self.files = tuple(files)
+        self.matches: tuple[Path, ...] = ()
+        self.search_request_id = 0
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Input(placeholder="Jump to file", id="file-jump-input"),
+            OptionList(id="file-jump-results", markup=False, compact=True),
+            id="file-jump-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#file-jump-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Update suggestions without performing any filesystem access."""
+        self.search_request_id += 1
+        if len(event.value) < 3:
+            self._apply_matches((), False, self.search_request_id)
+        else:
+            self.search_files(event.value, self.search_request_id)
+
+    @work(exclusive=True, group="file-jump-search")
+    async def search_files(self, query: str, token: int) -> None:
+        """Match paths off the event loop, coalescing rapid input changes."""
+        await asyncio.sleep(0.03)
+        matches, truncated = await asyncio.to_thread(
+            matching_files, self.files, query
+        )
+        self._apply_matches(matches, truncated, token)
+
+    def _apply_matches(
+        self, matches: tuple[Path, ...], truncated: bool, token: int
+    ) -> None:
+        """Apply current search results on the event thread."""
+        if token != self.search_request_id:
+            return
+        self.matches = matches
+        results = self.query_one("#file-jump-results", OptionList)
+        results.clear_options()
+        results.add_options(
+            Option(str(path), id=str(index))
+            for index, path in enumerate(self.matches)
+        )
+        results.display = bool(self.matches)
+        results.styles.height = min(
+            len(self.matches), max(1, self.size.height - 7)
+        )
+        results.tooltip = (
+            f"Showing first {MAX_FILE_JUMP_RESULTS} matches" if truncated else None
+        )
+
+    def on_input_submitted(self, _: Input.Submitted) -> None:
+        """Choose the first suggestion directly from the search field."""
+        if self.matches:
+            self.dismiss(self.matches[0])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Choose the selected suggestion."""
+        if event.option.id is not None:
+            self.dismiss(self.matches[int(event.option.id)])
+
+    def on_key(self, event: events.Key) -> None:
+        """Move from the input to suggestions with the down arrow."""
+        if event.key != "down" or not isinstance(self.focused, Input):
+            return
+        results = self.query_one("#file-jump-results", OptionList)
+        if results.option_count:
+            results.highlighted = 0
+            results.focus()
+            event.prevent_default()
+            event.stop()
+
+    def on_click(self, event: events.Click) -> None:
+        """Dismiss when the backdrop outside the dialog is clicked."""
+        dialog = self.query_one("#file-jump-dialog")
+        if not dialog.region.contains(event.screen_x, event.screen_y):
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ShortcutScreen(ModalScreen[None]):
     """Show the application's keyboard shortcuts."""
 
@@ -354,6 +464,7 @@ Navigation
   Enter       Open the selected item
   1 / 2       Changes / Files tab
   n / p       Next / previous diff change
+  t           Jump to a file (Files tab)
 
 File actions
   Space       Check or uncheck a file
@@ -419,6 +530,7 @@ class GitPaneApp(App[None]):
         Binding("r", "refresh", "Refresh"),
         Binding("space", "toggle_file", "Toggle"),
         Binding("w", "toggle_wrap", "Wrap"),
+        Binding("t", "quick_file_jump", "Jump to file"),
     ]
 
     def __init__(
@@ -447,6 +559,8 @@ class GitPaneApp(App[None]):
         self.diff_view: DiffView | None = None
         self.diff_change_index: int | None = None
         self.preview_wrapped = False
+        self.file_search_index: tuple[tuple[Path, str], ...] = ()
+        self.file_nodes: dict[Path, TreeNode[Path]] = {}
 
     def compose(self) -> ComposeResult:
         commit_tree: Tree[Commit | CommitFile] = Tree("", id="commit-tree")
@@ -598,6 +712,31 @@ class GitPaneApp(App[None]):
     def action_show_files(self) -> None:
         self.query_one("#main-tabs", TabbedContent).active = "files-tab"
         self.query_one("#files-tree", Tree).focus()
+
+    def action_quick_file_jump(self) -> None:
+        """Open the memory-backed file finder from the Files tab."""
+        if self.query_one("#main-tabs", TabbedContent).active != "files-tab":
+            return
+        if self.query_one("#files-tree", Tree).loading:
+            return
+        self.push_screen(FileJumpScreen(self.file_search_index), self._jump_to_file)
+
+    def _jump_to_file(self, path: Path | None) -> None:
+        """Reveal and select a cached file-tree node."""
+        if path is None or (node := self.file_nodes.get(path)) is None:
+            return
+        ancestor = node.parent
+        while ancestor is not None:
+            ancestor.expand()
+            ancestor = ancestor.parent
+        self.call_after_refresh(self._select_file_node, node)
+
+    def _select_file_node(self, node: TreeNode[Path]) -> None:
+        """Select a revealed file after the expanded tree has laid out."""
+        tree = self.query_one("#files-tree", Tree)
+        tree.select_node(node)
+        tree.scroll_to_node(node, animate=False)
+        tree.focus()
 
     def action_move_down(self) -> None:
         self._move_focused(1)
@@ -791,6 +930,8 @@ class GitPaneApp(App[None]):
 
     def refresh_files(self) -> None:
         """Request a file-tree refresh rooted at the launch directory."""
+        if isinstance(self.screen, FileJumpScreen):
+            self.screen.dismiss(None)
         self.files_request_id += 1
         self.preview_request_id += 1
         tree = self.query_one("#files-tree", Tree)
@@ -833,6 +974,7 @@ class GitPaneApp(App[None]):
         tree.root.set_label(icons.folder_label(str(self.cwd), expanded=True))
         tree.root.expand()
         nodes: dict[tuple[str, ...], TreeNode[Path]] = {(): tree.root}
+        file_nodes: dict[Path, TreeNode[Path]] = {}
         for path in files:
             parts = path.parts
             parent_parts: tuple[str, ...] = ()
@@ -847,7 +989,12 @@ class GitPaneApp(App[None]):
         for path in files:
             parts = path.parts
             parent_parts = parts[:-1]
-            nodes[parent_parts].add_leaf(icons.file_label(parts[-1]), self.cwd / path)
+            file_nodes[path] = nodes[parent_parts].add_leaf(
+                icons.file_label(parts[-1]), self.cwd / path
+            )
+
+        self.file_search_index = tuple((path, str(path).casefold()) for path in files)
+        self.file_nodes = file_nodes
 
         preview = self.query_one("#preview-view", CodeView)
         tree.loading = False
