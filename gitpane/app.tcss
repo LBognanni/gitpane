@@ -323,6 +323,7 @@ FileJumpScreen {
 
 #file-jump-results {
     display: none;
+    height: auto;
     background: $surface;
     color: $text;
     scrollbar-color: $accent;

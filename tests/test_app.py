@@ -303,6 +303,10 @@ def test_load_preview_view_builds_numbered_highlighted_lines(tmp_path: Path) -> 
     assert isinstance(view, PreviewView)
     assert [line.plain for line in view.lines] == [" 1 answer = 42", " 2 "]
     assert view.lines[0].spans
+    assert view.lines[0].style == ""
+    assert view.lines[0].spans[0].start == 0
+    assert view.lines[0].spans[0].end == 3
+    assert view.lines[0].spans[0].style == "dim"
 
 
 @pytest.mark.parametrize(
@@ -475,7 +479,9 @@ def test_matching_files_reports_only_actual_truncation() -> None:
 def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    nested = tmp_path / "src" / "reports" / "summary.py"
+    summary = Path("src/reports") / f"summary-{'x' * 80}.py"
+    summer = Path("src/reports") / f"summer-{'y' * 80}.py"
+    nested = tmp_path / summary
     nested.parent.mkdir(parents=True)
     nested.write_text("answer = 42\n")
     file_calls: list[Path] = []
@@ -486,7 +492,7 @@ def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
 
     def fake_files(cwd: Path) -> list[str]:
         file_calls.append(cwd)
-        return ["README.md", "src/reports/summary.py", "src/reports/summer.py"]
+        return ["README.md", str(summary), str(summer)]
 
     monkeypatch.setattr("gitpane.app.git.files", fake_files)
     monkeypatch.setattr(
@@ -529,7 +535,10 @@ def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
             await pilot.press("m")
             await app.screen.workers.wait_for_complete()
             await pilot.pause()
-            assert app.screen.query_one(OptionList).option_count == 2
+            results = app.screen.query_one(OptionList)
+            assert results.option_count == 2
+            assert results.region.height > results.option_count
+            assert results.max_scroll_y == 0
             assert dialog.region.height > initial_height
             assert file_calls == [tmp_path]
 
@@ -537,7 +546,7 @@ def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
             await pilot.pause()
 
             assert not isinstance(app.screen, FileJumpScreen)
-            target = app.file_nodes[Path("src/reports/summary.py")]
+            target = app.file_nodes[summary]
             reports = target.parent
             assert reports is not None
             src = reports.parent

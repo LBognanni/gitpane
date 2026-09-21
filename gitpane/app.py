@@ -141,7 +141,8 @@ def load_preview_view(path: Path) -> PreviewView:
     number_width = len(str(len(highlighted)))
     lines: list[Text] = []
     for number, highlighted_line in enumerate(highlighted, 1):
-        line = Text(f" {number:>{number_width}} ", style="dim")
+        line = Text()
+        line.append(f" {number:>{number_width}} ", style="dim")
         line.append_text(highlighted_line)
         lines.append(line)
     return PreviewView(tuple(lines), number_width + 2)
@@ -410,9 +411,8 @@ class FileJumpScreen(ModalScreen[Path | None]):
             for index, path in enumerate(self.matches)
         )
         results.display = bool(self.matches)
-        results.styles.height = min(
-            len(self.matches), max(1, self.size.height - 7)
-        )
+        results.styles.height = "auto"
+        results.styles.max_height = max(1, self.size.height - 7)
         results.tooltip = (
             f"Showing first {MAX_FILE_JUMP_RESULTS} matches" if truncated else None
         )
