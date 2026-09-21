@@ -84,6 +84,7 @@ class GitPaneApp(App[None]):
         self.auto_refresh_task: asyncio.Task[None] | None = None
         self.auto_pending: watcher.Invalidation | None = None
         self.auto_failing: set[str] = set()
+        self.shutting_down = False
         self.root = root
         self.cwd = cwd or root
         self.show_shortcuts_on_mount = show_shortcuts
@@ -166,7 +167,7 @@ class GitPaneApp(App[None]):
                         id="sidebar",
                     ),
                     VerticalSplitter(),
-                    DiffPane(self.root, self._show_git_error),
+                    DiffPane(self.root, self._show_git_error, self._note_quiet_diff),
                     id="body",
                 )
             with TabPane("Files", id="files-tab"):
@@ -193,6 +194,7 @@ class GitPaneApp(App[None]):
             self.push_screen(ShortcutScreen())
 
     async def on_unmount(self) -> None:
+        self.shutting_down = True
         tasks = [t for t in (self.watch_task, self.auto_refresh_task) if t]
         for task in tasks:
             task.cancel()
@@ -213,12 +215,27 @@ class GitPaneApp(App[None]):
                         self._run_auto_refresh()
                     )
         except Exception:  # noqa: BLE001 - never leave the task exception unretrieved
-            message = (
-                "Automatic refresh stopped. Press r to refresh manually."
-                if started
-                else "Automatic refresh could not start. Press r to refresh manually."
-            )
-            self.notify(message, severity="warning")
+            self._notify_watch_stopped(started)
+            return
+        if not self.shutting_down:
+            self._notify_watch_stopped(started)
+
+    def _notify_watch_stopped(self, started: bool) -> None:
+        message = (
+            "Automatic refresh stopped. Press r to refresh manually."
+            if started
+            else "Automatic refresh could not start. Press r to refresh manually."
+        )
+        self.notify(message, severity="warning")
+
+    def _note_quiet_diff(
+        self, error: subprocess.SubprocessError | OSError | None
+    ) -> None:
+        """Track the automatic diff-reload failure streak."""
+        if error is None:
+            self.auto_failing.discard("diff")
+        else:
+            self._notify_auto_failure("diff", error)
 
     async def _run_auto_refresh(self) -> None:
         """Run one status read at a time, folding events into one follow-up."""
@@ -241,7 +258,7 @@ class GitPaneApp(App[None]):
                 self.auto_failing.discard("status")
 
     def _notify_auto_failure(self, kind: str, error: Exception) -> None:
-        """Warn once per continuing streak of *kind* (status or history)."""
+        """Warn once per continuing streak of *kind* (status, history or diff)."""
         if kind in self.auto_failing:
             return
         self.auto_failing.add(kind)
@@ -482,6 +499,7 @@ class GitPaneApp(App[None]):
             stale = (
                 Path(selection.path) in invalidation.changed_paths
                 or invalidation.history
+                or (invalidation.index_changed and current.status != "?")
             )
         if stale:
             self.diff_pane.reload(current)

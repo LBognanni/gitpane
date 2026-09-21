@@ -633,3 +633,42 @@ def test_diff_failure_clears_loading_and_reports_error(
     asyncio.run(exercise())
 
     assert notifications == ["fatal: diff failed"]
+
+
+def test_quiet_reload_failure_keeps_the_document_and_scroll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.workers.wait_for_complete()
+            pane = app.diff_pane
+            view = app.query_one("#diff-view", CodeView)
+            lines = tuple(Text(f"line {index}") for index in range(100))
+            pane.apply(DiffView(lines, (10,)), pane.request_id)
+            await pilot.pause()
+            view.scroll_to(0, 20, animate=False)
+            await pilot.pause()
+            generation = view.document_generation
+
+            view.loading = True
+            pane.request_id += 1
+            pane.apply_quiet_error(OSError("diff failed"), pane.request_id)
+            await pilot.pause()
+
+            assert view.document_generation == generation
+            assert view.scroll_offset == (0, 20)
+            assert view.loading is False
+            assert [n.severity for n in app._notifications] == ["warning"]
+
+            view.loading = True
+            pane.apply_quiet_error(OSError("other"), pane.request_id - 1)
+            await pilot.pause()
+            assert view.loading is True
+            assert len(app._notifications) == 1
+
+    asyncio.run(exercise())

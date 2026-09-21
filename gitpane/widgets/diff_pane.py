@@ -18,15 +18,22 @@ from gitpane.model import FileEntry
 from gitpane.widgets.code_view import CodeView
 
 ErrorHandler = Callable[[str, subprocess.SubprocessError | OSError], None]
+QuietResultHandler = Callable[[subprocess.SubprocessError | OSError | None], None]
 
 
 class DiffPane(Vertical):
     """Own the shared working-tree and history diff viewer."""
 
-    def __init__(self, root: Path, on_error: ErrorHandler) -> None:
+    def __init__(
+        self,
+        root: Path,
+        on_error: ErrorHandler,
+        on_quiet_result: QuietResultHandler,
+    ) -> None:
         super().__init__(id="diff-pane")
         self.root = root
         self.on_error = on_error
+        self.on_quiet_result = on_quiet_result
         self.selection: DiffEntry | None = None
         self.request_id = 0
         self.diff_view: DiffView | None = None
@@ -91,7 +98,7 @@ class DiffPane(Vertical):
             view = load_diff_view(self.root, entry)
         except (subprocess.SubprocessError, OSError) as error:
             if quiet:
-                self.app.call_from_thread(self.stop_quiet_loading, token)
+                self.app.call_from_thread(self.apply_quiet_error, error, token)
             else:
                 self.app.call_from_thread(self.apply_error, error, token)
             return
@@ -102,6 +109,7 @@ class DiffPane(Vertical):
         """Replace the document, keeping scroll and a still-valid change index."""
         if token != self.request_id:
             return
+        self.on_quiet_result(None)
         viewer = self.query_one("#diff-view", CodeView)
         viewer.loading = False
         if view == self.diff_view:
@@ -116,10 +124,14 @@ class DiffPane(Vertical):
             min(x, viewer.max_scroll_x), min(y, viewer.max_scroll_y), animate=False
         )
 
-    def stop_quiet_loading(self, token: int) -> None:
-        """Clear a loading indicator left by a superseded normal request."""
-        if token == self.request_id:
-            self.stop_loading()
+    def apply_quiet_error(
+        self, error: subprocess.SubprocessError | OSError, token: int
+    ) -> None:
+        """Keep the old diff, clear any loading indicator and report quietly."""
+        if token != self.request_id:
+            return
+        self.stop_loading()
+        self.on_quiet_result(error)
 
     def show_missing(self) -> None:
         """Drop the selection and explain that its change is gone."""
