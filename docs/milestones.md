@@ -471,7 +471,7 @@ boot, real repository, or real Git invocation is part of verification.
 | BT-S3 — Complete app split | Accepted | BT-S2 | Viewer, status, and concurrency modules |
 | BT-S4 — Mounted theme outcomes | Accepted | BT-S3 | Presentation tests connected to rendered UI |
 | BT-S5 — Diff output contracts | Accepted | BT-S4 | Behavioral preparation/render/cache coverage |
-| BT-S6 — CodeView outcomes | Planned | BT-S5 | Public rendering, selection, and viewport coverage |
+| BT-S6 — CodeView outcomes | Accepted | BT-S5 | Public rendering, selection, and viewport coverage |
 | BT-S7 — Controlled stale work | Planned | BT-S6 | Newest-result-wins concurrency workflows |
 | BT-S8 — Mixed workflow trim | Planned | BT-S7 | Visible application outcomes without internal proxies |
 | BT-S9 — Final audit/cleanup | Planned | BT-S1–BT-S8 | Passing gates and completed milestone record |
