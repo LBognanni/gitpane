@@ -4,11 +4,10 @@ import pytest
 from rich.style import Style
 from rich.text import Text
 
+import gitpane.app
 from gitpane.app import (
-    DiffView,
     build_diff_view,
     highlight_new_lines,
-    lexer_for_entry,
     load_diff_view,
     reconstruct_new_source,
     render_diff_rows,
@@ -16,15 +15,45 @@ from gitpane.app import (
 from gitpane.diff import Row
 from gitpane.model import FileEntry, Side
 
+GUTTER_WIDTH = 12
 
-def join_diff_lines(lines: tuple[Text, ...]) -> Text:
-    """Join prepared lines for assertions about their text and spans."""
-    result = Text()
-    for index, line in enumerate(lines):
-        if index:
-            result.append("\n")
-        result.append_text(line)
-    return result
+PATCH = """\
+diff --git a/module.py b/module.py
+index 1111111..2222222 100644
+--- a/module.py
++++ b/module.py
+@@ -1,3 +1,4 @@
+ import os
+-x = 1
++x = 2
++
+ def f():
+"""
+
+
+def hunk(body: str) -> str:
+    """Wrap hunk lines in file headers so they parse as a unified patch."""
+    lines = body.splitlines()
+    old = sum(not line.startswith("+") for line in lines)
+    new = sum(not line.startswith("-") for line in lines)
+    return f"--- a/f\n+++ b/f\n@@ -1,{old} +1,{new} @@\n{body}"
+
+
+def source_colors(line: Text) -> set[object]:
+    """Return the distinct foreground colors used across the source column."""
+    return {style_at(line, i).color for i in range(GUTTER_WIDTH, len(line.plain))}
+
+
+def style_at(line: Text, offset: int) -> Style:
+    """Return the effective style of one character in a prepared line."""
+    return Style.combine(
+        [Style()]
+        + [
+            span.style
+            for span in line.spans
+            if span.start <= offset < span.end and isinstance(span.style, Style)
+        ]
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -32,201 +61,120 @@ def _clear_diff_view_cache() -> None:
     build_diff_view.cache_clear()
 
 
-def test_load_diff_view_forwards_root_and_entry_to_git_diff_then_builds(
+def test_load_diff_view_prepares_visible_rows_and_change_positions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = Path("/repo")
-    entry = FileEntry("file.txt", Side.STAGED, "M")
-    patch = "raw patch"
-    view = DiffView((Text("built"),), ())
-    calls: list[tuple[object, ...]] = []
+    entry = FileEntry("module.py", Side.STAGED, "M")
+    requested: list[tuple[Path, FileEntry]] = []
 
     def fake_diff(received_root: Path, received_entry: FileEntry) -> str:
-        calls.append(("diff", received_root, received_entry))
-        return patch
-
-    def fake_build_diff_view(
-        received_entry: FileEntry, received_patch: str
-    ) -> DiffView:
-        calls.append(("build", received_entry, received_patch))
-        return view
+        requested.append((received_root, received_entry))
+        return PATCH
 
     monkeypatch.setattr("gitpane.app.git.diff", fake_diff)
-    monkeypatch.setattr("gitpane.app.build_diff_view", fake_build_diff_view)
 
-    assert load_diff_view(root, entry) is view
-    assert calls == [("diff", root, entry), ("build", entry, patch)]
+    view = load_diff_view(root, entry)
 
-
-def test_build_diff_view_prepares_independent_lines_without_a_joined_document(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    entry = FileEntry("example.txt", Side.STAGED, "M")
-    rows = [
-        Row(1, 1, "context [not markup]", "context"),
-        Row(2, None, "removed", "remove"),
-        Row(None, 2, "added", "add"),
-    ]
-    monkeypatch.setattr("gitpane.app.diff.parse", lambda _: rows)
-
-    view = build_diff_view(entry, "irrelevant patch text")
-
-    assert isinstance(view.lines, tuple)
+    assert requested == [(root, entry)]
     assert [line.plain for line in view.lines] == [
-        "     1    1 context [not markup]",
-        "-    2      removed",
-        "+         2 added",
+        "     1    1 import os",
+        "-    2      x = 1",
+        "+         2 x = 2",
+        "+         3 ",
+        "     3    4 def f():",
     ]
-    assert view.lines == render_diff_rows(entry, rows)
-    assert not hasattr(view, "text")
-
-
-def test_build_diff_view_reports_changes_for_a_diff_with_changes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    entry = FileEntry("example.diff", Side.STAGED, "M")
-    rows = [
-        Row(1, 1, "context", "context"),
-        Row(2, None, "removed", "remove"),
-        Row(None, 2, "added", "add"),
-    ]
-    monkeypatch.setattr("gitpane.app.diff.parse", lambda _: rows)
-
-    view = build_diff_view(entry, "irrelevant patch text")
-
     assert view.changes == (1,)
     assert view.first_change == 1
+    context, removed, added, blank_added, _ = view.lines
+    assert style_at(removed, 0).bgcolor is not None
+    assert style_at(added, 0).bgcolor is not None
+    assert style_at(removed, 0).bgcolor != style_at(added, 0).bgcolor
+    assert style_at(blank_added, 0).bgcolor == style_at(added, 0).bgcolor
+    assert style_at(context, 0).bgcolor != style_at(added, 0).bgcolor
+    assert style_at(context, GUTTER_WIDTH).color is not None
 
 
-def test_build_diff_view_reports_none_for_an_all_context_diff(
+def test_load_diff_view_reports_no_changes_for_an_all_context_patch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entry = FileEntry("example.diff", Side.STAGED, "M")
-    rows = [
-        Row(1, 1, "context one", "context"),
-        Row(2, 2, "context two", "context"),
+    patch = hunk(" context one\n context two\n")
+    monkeypatch.setattr("gitpane.app.git.diff", lambda root, entry: patch)
+
+    view = load_diff_view(Path("/repo"), FileEntry("notes.txt", Side.STAGED, "M"))
+
+    assert [line.plain for line in view.lines] == [
+        "     1    1 context one",
+        "     2    2 context two",
     ]
-    monkeypatch.setattr("gitpane.app.diff.parse", lambda _: rows)
-
-    view = build_diff_view(entry, "irrelevant patch text")
-
     assert view.changes == ()
     assert view.first_change is None
 
 
-def test_build_diff_view_caches_repeated_identical_entry_and_patch(
-    monkeypatch: pytest.MonkeyPatch,
+def test_diff_rows_show_bracketed_source_literally() -> None:
+    view = build_diff_view(
+        FileEntry("notes.txt", Side.STAGED, "M"),
+        hunk("-[old]\n+[new] [/bold]\n"),
+    )
+
+    assert [line.plain for line in view.lines] == [
+        "-    1      [old]",
+        "+         1 [new] [/bold]",
+    ]
+
+
+@pytest.fixture
+def count_renders(monkeypatch: pytest.MonkeyPatch) -> list[FileEntry]:
+    """Record each full render performed while building a diff view."""
+    renders: list[FileEntry] = []
+    real_render = gitpane.app.render_diff_rows
+
+    def counting_render(entry: FileEntry, rows: list[Row]) -> tuple[Text, ...]:
+        renders.append(entry)
+        return real_render(entry, rows)
+
+    monkeypatch.setattr("gitpane.app.render_diff_rows", counting_render)
+    return renders
+
+
+def test_build_diff_view_renders_an_identical_entry_and_patch_once(
+    count_renders: list[FileEntry],
 ) -> None:
-    calls: list[str] = []
-    entry = FileEntry("a.txt", Side.STAGED, "M")
-    patch = "patch a"
+    entry = FileEntry("module.py", Side.STAGED, "M")
 
-    def fake_parse(received_patch: str) -> list[Row]:
-        calls.append("parse")
-        return [Row(1, 1, received_patch, "context")]
+    first = build_diff_view(entry, PATCH)
+    second = build_diff_view(entry, PATCH)
 
-    def fake_render_diff_rows(
-        received_entry: FileEntry, rows: list[Row]
-    ) -> tuple[Text, ...]:
-        calls.append("render")
-        return (Text(rows[0].text),)
-
-    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
-    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
-
-    first = build_diff_view(entry, patch)
-    second = build_diff_view(entry, patch)
-
-    assert calls == ["parse", "render"]
-    assert first is second
-    assert first.lines is second.lines
+    assert len(count_renders) == 1
+    assert [line.plain for line in second.lines] == [line.plain for line in first.lines]
 
 
-def test_build_diff_view_rebuilds_for_a_different_patch_on_the_same_entry(
-    monkeypatch: pytest.MonkeyPatch,
+def test_build_diff_view_shows_new_output_for_a_changed_patch(
+    count_renders: list[FileEntry],
 ) -> None:
-    calls: list[str] = []
-    entry = FileEntry("a.txt", Side.STAGED, "M")
+    entry = FileEntry("module.py", Side.STAGED, "M")
 
-    def fake_parse(received_patch: str) -> list[Row]:
-        calls.append("parse")
-        return [Row(1, 1, received_patch, "context")]
+    first = build_diff_view(entry, hunk("-a = 1\n+a = 2\n"))
+    second = build_diff_view(entry, hunk("-a = 1\n+a = 3\n"))
 
-    def fake_render_diff_rows(
-        received_entry: FileEntry, rows: list[Row]
-    ) -> tuple[Text, ...]:
-        calls.append("render")
-        return (Text(rows[0].text),)
-
-    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
-    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
-
-    first = build_diff_view(entry, "patch a")
-    second = build_diff_view(entry, "patch b")
-
-    assert calls == ["parse", "render", "parse", "render"]
-    assert first.lines[0].plain == "patch a"
-    assert second.lines[0].plain == "patch b"
+    assert first.lines[1].plain.endswith("a = 2")
+    assert second.lines[1].plain.endswith("a = 3")
 
 
-def test_build_diff_view_rebuilds_for_a_different_entry_with_the_same_patch(
-    monkeypatch: pytest.MonkeyPatch,
+def test_build_diff_view_shows_new_output_for_a_changed_entry(
+    count_renders: list[FileEntry],
 ) -> None:
-    calls: list[str] = []
-    patch = "shared patch"
+    patch = hunk("-value\n+value = 1\n")
 
-    def fake_parse(received_patch: str) -> list[Row]:
-        calls.append("parse")
-        return [Row(1, 1, received_patch, "context")]
+    as_python = build_diff_view(FileEntry("value.py", Side.STAGED, "M"), patch)
+    as_text = build_diff_view(FileEntry("value.txt", Side.STAGED, "M"), patch)
 
-    def fake_render_diff_rows(
-        received_entry: FileEntry, rows: list[Row]
-    ) -> tuple[Text, ...]:
-        calls.append("render")
-        return (Text(f"{received_entry.path}:{rows[0].text}"),)
-
-    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
-    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
-
-    entry_a = FileEntry("a.txt", Side.STAGED, "M")
-    entry_b = FileEntry("b.txt", Side.STAGED, "M")
-
-    first = build_diff_view(entry_a, patch)
-    second = build_diff_view(entry_b, patch)
-
-    assert calls == ["parse", "render", "parse", "render"]
-    assert first.lines[0].plain == "a.txt:shared patch"
-    assert second.lines[0].plain == "b.txt:shared patch"
-
-
-def test_build_diff_view_evicts_the_oldest_entry_after_a_fifth_distinct_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    def fake_parse(received_patch: str) -> list[Row]:
-        calls.append("parse")
-        return [Row(1, 1, received_patch, "context")]
-
-    def fake_render_diff_rows(
-        received_entry: FileEntry, rows: list[Row]
-    ) -> tuple[Text, ...]:
-        calls.append("render")
-        return (Text(rows[0].text),)
-
-    monkeypatch.setattr("gitpane.app.diff.parse", fake_parse)
-    monkeypatch.setattr("gitpane.app.render_diff_rows", fake_render_diff_rows)
-
-    entries = [FileEntry(f"{i}.txt", Side.STAGED, "M") for i in range(5)]
-
-    for entry in entries:
-        build_diff_view(entry, "patch")
-
-    assert calls == ["parse", "render"] * 5
-    calls.clear()
-
-    build_diff_view(entries[0], "patch")
-    assert calls == ["parse", "render"]
+    assert [line.plain for line in as_python.lines] == [
+        line.plain for line in as_text.lines
+    ]
+    # Only the Python entry gets more than one syntax color.
+    assert len(source_colors(as_python.lines[1])) > 1
+    assert len(source_colors(as_text.lines[1])) == 1
 
 
 def test_reconstruct_new_source_keeps_only_new_side_text_and_whitespace() -> None:
@@ -248,85 +196,76 @@ def test_reconstruct_new_source_returns_empty_for_no_new_side(rows: list[Row]) -
     assert reconstruct_new_source(rows) == ""
 
 
-def test_lexer_for_entry_forwards_exact_path_and_source(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("path", "source", "colored_offset"),
+    [
+        ("example.py", "import os", 0),
+        ("example.PY", "import os", 0),
+        ("src/dir with spaces/example.js", "const x = 1;", 0),
+        ("example.json", '{"key": 1}', 1),
+        ("example.rs", "fn main() {}", 0),
+    ],
+)
+def test_render_diff_rows_colors_source_by_filename_language(
+    path: str, source: str, colored_offset: int
 ) -> None:
-    calls: list[tuple[str, str]] = []
+    entry = FileEntry(path, Side.UNSTAGED, "M")
 
-    def fake_guess_lexer(path: str, source: str) -> str:
-        calls.append((path, source))
-        return "returned unchanged"
+    (line,) = render_diff_rows(entry, [Row(1, 1, source, "context")])
 
-    monkeypatch.setattr("gitpane.app.Syntax.guess_lexer", fake_guess_lexer)
-    entry = FileEntry("directory with spaces/example.PY", Side.STAGED, "M")
-    source = "print('source')\n"
-
-    assert lexer_for_entry(entry, source) == "returned unchanged"
-    assert calls == [("directory with spaces/example.PY", source)]
+    assert line.plain == f"     1    1 {source}"
+    assert style_at(line, GUTTER_WIDTH + colored_offset).color is not None
 
 
-def test_highlight_new_lines_uses_one_whole_source_pass_and_retains_blank_lines(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[object, ...]] = []
-    highlighted = Text("first\n\nthird")
-    highlighted.stylize("bold", 0, 5)
-    highlighted.stylize("italic", 7, 12)
+def test_render_diff_rows_leaves_unrecognized_source_uncolored() -> None:
+    entry = FileEntry("notes.unknown", Side.UNSTAGED, "M")
 
-    class FakeSyntax:
-        def __init__(self, source: str, lexer: str) -> None:
-            calls.append(("init", source, lexer))
+    (line,) = render_diff_rows(entry, [Row(1, 1, "plain words", "context")])
 
-        @staticmethod
-        def guess_lexer(path: str, source: str) -> str:
-            calls.append(("guess", path, source))
-            return "fake-lexer"
+    assert line.plain == "     1    1 plain words"
+    assert len(source_colors(line)) == 1
 
-        def highlight(self, source: str) -> Text:
-            calls.append(("highlight", source))
-            return highlighted
 
-    monkeypatch.setattr("gitpane.app.Syntax", FakeSyntax)
+def test_highlight_new_lines_retains_blank_lines_in_new_side_order() -> None:
     entry = FileEntry("src/example.py", Side.UNSTAGED, "M")
     rows = [
-        Row(1, 1, "first", "context"),
-        Row(2, None, "removed", "remove"),
+        Row(1, 1, "import os", "context"),
+        Row(2, None, "removed = 1", "remove"),
         Row(None, 2, "", "add"),
-        Row(3, 3, "third", "context"),
+        Row(3, 3, "def f(): pass", "context"),
     ]
 
     lines = highlight_new_lines(entry, rows)
 
-    assert calls == [
-        ("guess", "src/example.py", "first\n\nthird"),
-        ("init", "first\n\nthird", "fake-lexer"),
-        ("highlight", "first\n\nthird"),
-    ]
-    assert all(isinstance(line, Text) for line in lines)
-    assert [line.plain for line in lines] == ["first", "", "third"]
-    assert [(span.start, span.end, span.style) for span in lines[0].spans] == [
-        (0, 5, "bold")
-    ]
-    assert [(span.start, span.end, span.style) for span in lines[2].spans] == [
-        (0, 5, "italic")
-    ]
+    assert [line.plain for line in lines] == ["import os", "", "def f(): pass"]
+    assert style_at(lines[0], 0).color is not None
+    assert style_at(lines[2], 0).color is not None
 
 
-def test_highlight_new_lines_skips_lexer_and_highlighter_for_all_removals(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def unexpected(*_: object) -> None:
-        raise AssertionError("highlighting should not run")
-
-    monkeypatch.setattr("gitpane.app.Syntax", unexpected)
+def test_render_diff_rows_shows_all_removals_as_removed_rows() -> None:
     entry = FileEntry("removed.py", Side.STAGED, "M")
 
-    assert highlight_new_lines(entry, [Row(1, None, "removed", "remove")]) == []
-
-
-def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() -> None:
-    entry = FileEntry("example.txt", Side.STAGED, "M")
     lines = render_diff_rows(
+        entry,
+        [Row(1, None, "import os", "remove"), Row(2, None, "x = 1", "remove")],
+    )
+
+    assert [line.plain for line in lines] == [
+        "-    1      import os",
+        "-    2      x = 1",
+    ]
+    for line in lines:
+        assert style_at(line, 0).bgcolor is not None
+        assert style_at(line, len(line.plain) - 1).bgcolor is not None
+        assert style_at(line, GUTTER_WIDTH).color is None
+
+
+def test_render_diff_rows_uses_plain_columns_and_full_width_change_backgrounds() -> (
+    None
+):
+    entry = FileEntry("example.txt", Side.STAGED, "M")
+
+    context, removed, added = render_diff_rows(
         entry,
         [
             Row(1, 1, "context [not markup]", "context"),
@@ -334,118 +273,45 @@ def test_render_diff_rows_uses_plain_columns_and_complete_change_row_styles() ->
             Row(None, 2, "added", "add"),
         ],
     )
-    rendered = join_diff_lines(lines)
 
-    assert (
-        rendered.plain
-        == "     1    1 context [not markup]\n-    2      removed\n+         2 added"
-    )
-    assert [
-        (span.start, span.end, span.style)
-        for span in rendered.spans
-        if span.style in {Style(bgcolor="#351b20"), Style(bgcolor="#142b1d")}
-    ] == [
-        (33, 52, Style(bgcolor="#351b20")),
-        (53, 70, Style(bgcolor="#142b1d")),
-    ]
-    assert [
-        [
-            (span.start, span.end, span.style)
-            for span in line.spans
-            if span.style in {Style(bgcolor="#351b20"), Style(bgcolor="#142b1d")}
-        ]
-        for line in lines
-    ] == [
-        [],
-        [(0, 19, Style(bgcolor="#351b20"))],
-        [(0, 17, Style(bgcolor="#142b1d"))],
-    ]
+    assert context.plain == "     1    1 context [not markup]"
+    assert removed.plain == "-    2      removed"
+    assert added.plain == "+         2 added"
+    assert style_at(context, 0).bgcolor is None
+    for line in (removed, added):
+        assert style_at(line, 0).bgcolor is not None
+        assert style_at(line, len(line.plain) - 1).bgcolor == style_at(line, 0).bgcolor
+    assert style_at(removed, 0).bgcolor != style_at(added, 0).bgcolor
 
 
-def test_render_diff_rows_preserves_empty_rows_without_extra_newlines() -> None:
+def test_render_diff_rows_preserves_empty_rows() -> None:
     lines = render_diff_rows(
         FileEntry("empty.txt", Side.STAGED, "M"), [Row(None, None, "", "context")]
     )
 
-    rendered = join_diff_lines(lines)
-    assert rendered.plain == "            "
-    assert rendered.spans == []
+    assert [line.plain for line in lines] == ["            "]
+    assert lines[0].spans == []
 
 
-def test_render_diff_rows_projects_highlights_by_new_side_position(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_render_diff_rows_projects_syntax_onto_source_not_gutter() -> None:
     entry = FileEntry("src/example.py", Side.UNSTAGED, "M")
-    rows = [
-        Row(20, 10, "context", "context"),
-        Row(21, None, "removed", "remove"),
-        Row(None, 30, "added", "add"),
-    ]
-    context = Text("context", style=Style(color="cyan"))
-    addition = Text("added", style=Style(color="magenta"))
-    calls: list[tuple[FileEntry, list[Row]]] = []
+    context, removed, added = render_diff_rows(
+        entry,
+        [
+            Row(20, 10, "import os", "context"),
+            Row(21, None, "import sys", "remove"),
+            Row(None, 30, "import re", "add"),
+        ],
+    )
 
-    def fake_highlight_new_lines(
-        received_entry: FileEntry, received_rows: list[Row]
-    ) -> list[Text]:
-        calls.append((received_entry, received_rows))
-        return [context, addition]
-
-    monkeypatch.setattr("gitpane.app.highlight_new_lines", fake_highlight_new_lines)
-
-    lines = render_diff_rows(entry, rows)
-    rendered = join_diff_lines(lines)
-
-    assert calls == [(entry, rows)]
-    assert (
-        rendered.plain == "    20   10 context\n-   21      removed\n+        30 added"
-    )
-    spans = [(span.start, span.end, span.style) for span in rendered.spans]
-    background_spans = [
-        (start, end, style)
-        for start, end, style in spans
-        if style in {Style(bgcolor="#351b20"), Style(bgcolor="#142b1d")}
-    ]
-    assert background_spans == [
-        (20, 39, Style(bgcolor="#351b20")),
-        (40, 57, Style(bgcolor="#142b1d")),
-    ]
-    assert all(
-        isinstance(style, Style) and style.color is None
-        for _, _, style in background_spans
-    )
-    syntax_spans = [
-        (start, end, style)
-        for start, end, style in spans
-        if style in {Style(color="cyan"), Style(color="magenta")}
-    ]
-    assert syntax_spans == [
-        (12, 19, Style(color="cyan")),
-        (52, 57, Style(color="magenta")),
-    ]
-    assert all(
-        start >= 12 and end <= 19 or start >= 52 and end <= 57
-        for start, end, style in spans
-        if style in {Style(color="cyan"), Style(color="magenta")}
-    )
-    assert not any(
-        start < 39 and end > 20 and isinstance(style, Style) and style.color is not None
-        for start, end, style in spans
-    )
-    assert not any(
-        start <= 19
-        and end > 0
-        and isinstance(style, Style)
-        and style.bgcolor is not None
-        for start, end, style in spans
-    )
-    assert [(span.start, span.end, span.style) for span in lines[0].spans] == [
-        (12, 19, Style(color="cyan"))
-    ]
-    assert [(span.start, span.end, span.style) for span in lines[1].spans] == [
-        (0, 19, Style(bgcolor="#351b20"))
-    ]
-    assert [(span.start, span.end, span.style) for span in lines[2].spans] == [
-        (12, 17, Style(color="magenta")),
-        (0, 17, Style(bgcolor="#142b1d")),
-    ]
+    assert context.plain == "    20   10 import os"
+    assert removed.plain == "-   21      import sys"
+    assert added.plain == "+        30 import re"
+    # The keyword is colored on the new side and the gutter never is.
+    assert style_at(context, GUTTER_WIDTH).color is not None
+    assert style_at(added, GUTTER_WIDTH).color is not None
+    assert style_at(added, GUTTER_WIDTH).bgcolor is not None
+    assert style_at(context, 0).color is None
+    assert style_at(added, 0).color is None
+    # Removed rows show old-side source without syntax coloring.
+    assert style_at(removed, GUTTER_WIDTH).color is None
