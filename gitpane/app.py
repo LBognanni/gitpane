@@ -90,6 +90,7 @@ class GitPaneApp(App[None]):
         self.show_shortcuts_on_mount = show_shortcuts
         self.status_request_id = 0
         self.applied_state: RepoState | None = None
+        self.applied_commits: list[Commit] | None = None
         self.history_request_id = 0
         self.commit_files_request_id = 0
         self.mutation_lock = asyncio.Lock()
@@ -506,7 +507,6 @@ class GitPaneApp(App[None]):
 
     def refresh_history(self, *, quiet: bool = False) -> None:
         self.history_request_id += 1
-        self.commit_files_request_id += 1
         if not quiet:
             self.query_one("#commit-tree", Tree).loading = True
         self.load_history(self.history_request_id, quiet)
@@ -543,22 +543,45 @@ class GitPaneApp(App[None]):
     ) -> None:
         if token != self.history_request_id:
             return
-        self.commit_files_request_id += 1
         tree = self.query_one("#commit-tree", Tree)
-        tree.clear()
-        for commit in commits:
-            tree.root.add(format_commit_label(commit), commit)
         tree.loading = False
         if quiet:
             self.auto_failing.discard("history")
-        if (
-            not quiet
-            and commits
-            and not self.query_one("#staged-list", ListView).children
-            and not self.query_one("#unstaged-list", ListView).children
-        ):
-            tree.select_node(tree.root.children[0])
-            tree.focus()
+        if commits != self.applied_commits:
+            self._rebuild_commit_tree(tree, commits)
+            self.applied_commits = list(commits)
+            if (
+                not quiet
+                and commits
+                and not self.query_one("#staged-list", ListView).children
+                and not self.query_one("#unstaged-list", ListView).children
+            ):
+                tree.select_node(tree.root.children[0])
+                tree.focus()
+
+    @staticmethod
+    def _cursor_commit_hash(tree: Tree[Commit | CommitFile]) -> str | None:
+        node = tree.cursor_node
+        data = node.data if node is not None else None
+        if isinstance(data, Commit):
+            return data.hash
+        if isinstance(data, CommitFile):
+            return data.commit_hash
+        return None
+
+    def _rebuild_commit_tree(
+        self, tree: Tree[Commit | CommitFile], commits: list[Commit]
+    ) -> None:
+        """Rebuild the tree, keeping the cursor on the same commit."""
+        target = self._cursor_commit_hash(tree)
+        self.commit_files_request_id += 1
+        tree.clear()
+        for commit in commits:
+            tree.root.add(format_commit_label(commit), commit)
+        index = next((i for i, c in enumerate(commits) if c.hash == target), None)
+        if index is not None:
+            tree.cursor_line = index
+            tree.scroll_to_line(index, animate=False)
 
     def refresh_files(self) -> None:
         self.file_browser.refresh_files()

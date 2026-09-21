@@ -9,7 +9,7 @@ from textual.widgets import ListView, Static, Tree
 
 import gitpane.app as app_module
 from gitpane.app import GitPaneApp
-from gitpane.model import Commit, FileEntry, RepoState, Side
+from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
 from gitpane.watcher import Invalidation
 from gitpane.widgets import CodeView, FileItem
 
@@ -1168,5 +1168,172 @@ def test_watcher_ending_without_events_notifies_stopped(
             messages = [n.message for n in app._notifications]
             assert len(messages) == 1
             assert "stopped" in messages[0] and "Press r" in messages[0]
+
+    asyncio.run(exercise())
+
+
+FIRST = Commit("a" * 40, "aaaaaaa", None, "first")
+SECOND = Commit("b" * 40, "bbbbbbb", "a" * 40, "second")
+THIRD = Commit("c" * 40, "ccccccc", "b" * 40, "third")
+
+
+def cursor_hash(tree: Tree[object]) -> str:
+    node = tree.cursor_node
+    assert node is not None
+    assert isinstance(node.data, Commit)
+    return node.data.hash
+
+
+async def wait_until(pilot: Pilot[None], condition: Callable[[], bool]) -> None:
+    for _ in range(100):
+        if condition():
+            return
+        await pilot.pause()
+    assert condition()
+
+
+def test_unrelated_ref_event_keeps_expanded_commit_files_and_cursor(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [SECOND, FIRST])
+    monkeypatch.setattr(
+        "gitpane.app.git.commit_files",
+        lambda _root, commit: [CommitFile("x.txt", "M", commit.hash, commit.parent)],
+    )
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            tree = app.query_one("#commit-tree", Tree)
+            newest, older = tree.root.children
+            newest.expand()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert [str(n.label) for n in newest.children] == ["M x.txt"]
+            tree.move_cursor(older)
+            await pilot.pause()
+            assert cursor_hash(tree) == FIRST.hash
+
+            await settle(
+                app, pilot, repo, Invalidation(status=True, history=True), queue
+            )
+
+            newest = tree.root.children[0]
+            assert newest.is_expanded
+            assert [str(n.label) for n in newest.children] == ["M x.txt"]
+            assert cursor_hash(tree) == FIRST.hash
+            assert tree.loading is False
+
+    asyncio.run(exercise())
+
+
+def test_new_commit_keeps_the_selected_commit_under_the_cursor(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    commits = [[SECOND, FIRST]]
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: commits[0])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            tree = app.query_one("#commit-tree", Tree)
+            tree.move_cursor(tree.root.children[1])
+            await pilot.pause()
+            assert cursor_hash(tree) == FIRST.hash
+            title = str(app.query_one("#diff-title", Static).content)
+            diff = diff_text(app)
+            assert "b.txt version 1" in diff
+
+            commits[0] = [THIRD, SECOND, FIRST]
+            await settle(
+                app, pilot, repo, Invalidation(status=True, history=True), queue
+            )
+
+            assert [str(n.label) for n in tree.root.children] == [
+                "third ccccccc",
+                "second bbbbbbb",
+                "first aaaaaaa",
+            ]
+            assert tree.cursor_line == 2
+            assert cursor_hash(tree) == FIRST.hash
+            assert diff_text(app) == diff
+            assert str(app.query_one("#diff-title", Static).content) == title
+
+    asyncio.run(exercise())
+
+
+def test_commit_files_survive_an_equal_history_refresh(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [SECOND, FIRST])
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked(_root: Path, commit: Commit) -> list[CommitFile]:
+        started.set()
+        assert release.wait(timeout=5)
+        return [CommitFile("x.txt", "M", commit.hash, commit.parent)]
+
+    monkeypatch.setattr("gitpane.app.git.commit_files", blocked)
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            tree = app.query_one("#commit-tree", Tree)
+            newest = tree.root.children[0]
+            newest.expand()
+            await wait(started)
+
+            before = repo.calls
+            queue.put_nowait(Invalidation(status=True, history=True))
+            while repo.calls == before:
+                await pilot.pause()
+            assert app.auto_refresh_task is not None
+            await app.auto_refresh_task
+            await wait_until(
+                pilot, lambda: not any(w.group == "history" for w in app.workers)
+            )
+            release.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            assert [str(n.label) for n in newest.children] == ["M x.txt"]
+            assert tree.loading is False
+
+    asyncio.run(exercise())
+
+
+def test_manual_refresh_with_equal_history_keeps_the_commit_expanded(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo.unstaged = []
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [SECOND, FIRST])
+    monkeypatch.setattr(
+        "gitpane.app.git.commit_files",
+        lambda _root, commit: [CommitFile("x.txt", "M", commit.hash, commit.parent)],
+    )
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            tree = app.query_one("#commit-tree", Tree)
+            assert tree.root.children[0].is_expanded
+            assert [str(n.label) for n in tree.root.children[0].children] == ["M x.txt"]
+
+            await pilot.press("r")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            newest = tree.root.children[0]
+            assert newest.is_expanded
+            assert [str(n.label) for n in newest.children] == ["M x.txt"]
 
     asyncio.run(exercise())
