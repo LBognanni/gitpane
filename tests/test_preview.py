@@ -6,8 +6,9 @@ from rich.text import Text
 from textual.content import Content
 from textual.widgets import Static, TabbedContent, Tree
 
-from gitpane.app import MAX_PREVIEW_BYTES, GitPaneApp, PreviewView, load_preview_view
+from gitpane.app import GitPaneApp
 from gitpane.model import RepoState
+from gitpane.preview import MAX_PREVIEW_BYTES, PreviewView, load_preview_view
 from gitpane.widgets import CodeView, scrollbar_click_target
 
 
@@ -146,8 +147,9 @@ def test_loaded_preview_uses_current_wrap_setting(
             await pilot.press("w")
             await pilot.pause()
 
-            app.apply_preview_view(
-                PreviewView((Text(" 1 value = 1"),)), app.preview_request_id
+            app.file_browser.apply_preview(
+                PreviewView((Text(" 1 value = 1"),)),
+                app.file_browser.preview_request_id,
             )
 
             preview = app.query_one("#preview-view", CodeView)

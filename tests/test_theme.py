@@ -13,10 +13,11 @@ from textual.selection import Selection
 from textual.widget import Widget
 from textual.widgets import Button, ListView, Static, TabbedContent, Tabs
 
-from gitpane.app import DiffView, FileItem, GitPaneApp, render_diff_rows
+from gitpane.app import GitPaneApp
 from gitpane.diff import Row
+from gitpane.diff_view import DiffView, render_diff_rows
 from gitpane.model import FileEntry, RepoState, Side
-from gitpane.widgets import CodeView
+from gitpane.widgets import CodeView, DiffPane, FileItem
 
 TEXT_FLOOR = 4.5
 INDICATOR_FLOOR = 3.0
@@ -82,7 +83,7 @@ def _mount(
     )
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
-    monkeypatch.setattr(GitPaneApp, "load_diff", lambda *_: None)
+    monkeypatch.setattr(DiffPane, "load", lambda *_: None)
 
     async def run() -> None:
         app = GitPaneApp(tmp_path)
@@ -300,9 +301,9 @@ def test_long_diff_title_keeps_navigation_visible_and_right_aligned(
         unstaged.focus()
         await pilot.press("enter")
         await pilot.pause()
-        app.apply_diff_view(
+        app.diff_pane.apply(
             DiffView(tuple(Text(f"line {index}") for index in range(20)), (2, 10)),
-            app.request_id,
+            app.diff_pane.request_id,
         )
         await pilot.pause()
 

@@ -4,15 +4,15 @@ import pytest
 from rich.style import Style
 from rich.text import Text
 
-import gitpane.app
-from gitpane.app import (
+import gitpane.diff_view
+from gitpane.diff import Row
+from gitpane.diff_view import (
     build_diff_view,
     highlight_new_lines,
     load_diff_view,
     reconstruct_new_source,
     render_diff_rows,
 )
-from gitpane.diff import Row
 from gitpane.model import FileEntry, Side
 
 GUTTER_WIDTH = 12
@@ -127,13 +127,13 @@ def test_diff_rows_show_bracketed_source_literally() -> None:
 def count_renders(monkeypatch: pytest.MonkeyPatch) -> list[FileEntry]:
     """Record each full render performed while building a diff view."""
     renders: list[FileEntry] = []
-    real_render = gitpane.app.render_diff_rows
+    real_render = gitpane.diff_view.render_diff_rows
 
     def counting_render(entry: FileEntry, rows: list[Row]) -> tuple[Text, ...]:
         renders.append(entry)
         return real_render(entry, rows)
 
-    monkeypatch.setattr("gitpane.app.render_diff_rows", counting_render)
+    monkeypatch.setattr("gitpane.diff_view.render_diff_rows", counting_render)
     return renders
 
 

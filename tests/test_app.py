@@ -6,14 +6,10 @@ from rich.text import Text
 from textual.content import Content
 from textual.widgets import ListView, Static, TabbedContent, Tree
 
-from gitpane.app import (
-    DiffView,
-    GitPaneApp,
-    ShortcutScreen,
-    claim_first_launch,
-    format_commit_label,
-)
+from gitpane.app import GitPaneApp, format_commit_label
+from gitpane.diff_view import DiffView
 from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
+from gitpane.screens.shortcuts import ShortcutScreen, claim_first_launch
 from gitpane.widgets import CodeView
 
 
@@ -47,7 +43,9 @@ def test_claim_first_launch_uses_platform_state_path_once(
         calls.append((*args, kwargs))
         return state_path
 
-    monkeypatch.setattr("gitpane.app.user_state_path", fake_user_state_path)
+    monkeypatch.setattr(
+        "gitpane.screens.shortcuts.user_state_path", fake_user_state_path
+    )
 
     assert claim_first_launch() is True
     assert (state_path / "shortcuts-shown").is_file()
@@ -171,15 +169,15 @@ def test_keyboard_shortcuts_navigate_and_act_on_the_focused_file(
             await pilot.press("j")
             assert staged_list.index == 1
 
-            app.apply_diff_view(
+            app.diff_pane.apply(
                 DiffView(tuple(Text(str(index)) for index in range(40)), (5, 20)),
-                app.request_id,
+                app.diff_pane.request_id,
             )
             await pilot.pause()
             await pilot.press("n")
-            assert app.diff_change_index == 1
+            assert app.diff_pane.change_index == 1
             await pilot.press("p")
-            assert app.diff_change_index == 0
+            assert app.diff_pane.change_index == 0
 
     asyncio.run(exercise())
 
@@ -303,7 +301,7 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             await app.workers.wait_for_complete()
             await pilot.pause()
 
-            assert app.selection == entry
+            assert app.diff_pane.selection == entry
             diff_title = app.query_one("#diff-title", Static).render()
             assert isinstance(diff_title, Content)
             assert diff_title.plain == entry.path

@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input, OptionList, TabbedContent, Tree
 
-from gitpane.app import FileJumpScreen, GitPaneApp, matching_files
+from gitpane.app import GitPaneApp
 from gitpane.model import RepoState
+from gitpane.screens.file_jump import FileJumpScreen, matching_files
 from gitpane.widgets import CodeView
 
 
@@ -109,7 +110,7 @@ def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
             await pilot.pause()
 
             assert not isinstance(app.screen, FileJumpScreen)
-            target = app.file_nodes[summary]
+            target = app.file_browser.file_nodes[summary]
             reports = target.parent
             assert reports is not None
             src = reports.parent

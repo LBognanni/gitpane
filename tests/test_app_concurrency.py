@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 from textual.widgets import ListView, Static, Tree
 
-from gitpane.app import FileItem, GitPaneApp
+from gitpane.app import GitPaneApp
 from gitpane.model import Commit, FileEntry, RepoState, Side
+from gitpane.widgets import FileItem
 
 
 def test_status_refresh_runs_git_off_the_event_thread(

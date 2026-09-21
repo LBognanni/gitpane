@@ -11,9 +11,11 @@ from textual.geometry import Offset
 from textual.selection import Selection
 from textual.widgets import Button, Static, TabbedContent
 
-from gitpane.app import DiffView, GitPaneApp, PreviewView
+from gitpane.app import GitPaneApp
+from gitpane.diff_view import DiffView
 from gitpane.model import FileEntry, RepoState, Side
-from gitpane.widgets import CodeView, scrollbar_click_target
+from gitpane.preview import PreviewView
+from gitpane.widgets import CodeView, DiffPane, scrollbar_click_target
 
 
 def visible_text(view: CodeView) -> str:
@@ -31,24 +33,24 @@ def test_wrap_toggle_applies_independently_to_each_viewer(
         async with app.run_test() as pilot:
             await pilot.press("w")
 
-            assert app.diff_wrapped is True
-            assert app.preview_wrapped is False
+            assert app.diff_pane.wrapped is True
+            assert app.file_browser.wrapped is False
             assert app.query_one("#diff-view", CodeView).wrapped is True
 
             app.query_one("#main-tabs", TabbedContent).active = "files-tab"
-            app.apply_preview_view(
+            app.file_browser.apply_preview(
                 PreviewView((Text(" 1 value = 'a long line'"),)),
-                app.preview_request_id,
+                app.file_browser.preview_request_id,
             )
             await pilot.press("w")
 
-            assert app.diff_wrapped is True
-            assert app.preview_wrapped is True
+            assert app.diff_pane.wrapped is True
+            assert app.file_browser.wrapped is True
             assert app.query_one("#preview-view", CodeView).wrapped is True
 
             await pilot.press("w")
 
-            assert app.preview_wrapped is False
+            assert app.file_browser.wrapped is False
             assert app.query_one("#preview-view", CodeView).wrapped is False
 
     asyncio.run(exercise())
@@ -89,16 +91,16 @@ def test_diff_and_preview_display_replace_scroll_and_wrap_independently(
             diff_view = app.query_one("#diff-view", CodeView)
             preview_view = app.query_one("#preview-view", CodeView)
 
-            app.apply_diff_view(
+            app.diff_pane.apply(
                 DiffView(tuple(Text(f"diff {i} " + "d" * 120) for i in range(500)), ()),
-                app.request_id,
+                app.diff_pane.request_id,
             )
             app.query_one("#main-tabs", TabbedContent).active = "files-tab"
-            app.apply_preview_view(
+            app.file_browser.apply_preview(
                 PreviewView(
                     tuple(Text(f"preview {i} " + "p" * 120) for i in range(500))
                 ),
-                app.preview_request_id,
+                app.file_browser.preview_request_id,
             )
             await pilot.pause()
 
@@ -120,8 +122,9 @@ def test_diff_and_preview_display_replace_scroll_and_wrap_independently(
             assert preview_view.wrapped is True
             assert diff_view.wrapped is False
 
-            app.apply_preview_view(
-                PreviewView((Text("replacement"),)), app.preview_request_id
+            app.file_browser.apply_preview(
+                PreviewView((Text("replacement"),)),
+                app.file_browser.preview_request_id,
             )
             await pilot.pause()
             assert "replacement" in visible_text(preview_view)
@@ -145,7 +148,7 @@ def test_diff_first_change_scrolls_past_leading_context(
             view = app.query_one("#diff-view", CodeView)
             lines = tuple(Text(f"line {index}") for index in range(80))
 
-            app.apply_diff_view(DiffView(lines, (17,)), app.request_id)
+            app.diff_pane.apply(DiffView(lines, (17,)), app.diff_pane.request_id)
             await pilot.pause()
 
             assert view.scroll_offset == (0, 13)
@@ -163,7 +166,9 @@ def test_diff_change_buttons_navigate_and_disable_at_endpoints(
         app = GitPaneApp(tmp_path)
         async with app.run_test(size=(80, 12)) as pilot:
             lines = tuple(Text(f"line {index} " + "x" * 100) for index in range(100))
-            app.apply_diff_view(DiffView(lines, (10, 30, 70)), app.request_id)
+            app.diff_pane.apply(
+                DiffView(lines, (10, 30, 70)), app.diff_pane.request_id
+            )
             await pilot.pause()
             previous = app.query_one("#previous-change", Button)
             next_change = app.query_one("#next-change", Button)
@@ -208,14 +213,14 @@ def test_requesting_a_diff_disables_navigation_until_it_loads(
     entry = FileEntry("example.py", Side.UNSTAGED, "M")
     monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
-    monkeypatch.setattr(GitPaneApp, "load_diff", lambda *_: None)
+    monkeypatch.setattr(DiffPane, "load", lambda *_: None)
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
         async with app.run_test() as pilot:
-            app.apply_diff_view(
+            app.diff_pane.apply(
                 DiffView(tuple(Text(str(index)) for index in range(40)), (2, 20)),
-                app.request_id,
+                app.diff_pane.request_id,
             )
             await pilot.pause()
             assert app.query_one("#next-change", Button).disabled is False
@@ -239,7 +244,7 @@ def test_diff_view_supports_line_page_jump_and_long_horizontal_navigation(
         async with app.run_test(size=(80, 12)) as pilot:
             view = app.query_one("#diff-view", CodeView)
             lines = tuple(Text(f"{row:03} " + "x" * 200) for row in range(100))
-            app.apply_diff_view(DiffView(lines, ()), app.request_id)
+            app.diff_pane.apply(DiffView(lines, ()), app.diff_pane.request_id)
             await pilot.pause()
             view.focus()
 
@@ -274,7 +279,7 @@ def test_diff_request_and_refresh_clear_viewer(
     entry = FileEntry("example.py", Side.UNSTAGED, "M")
     monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
-    monkeypatch.setattr(GitPaneApp, "load_diff", lambda *_: None)
+    monkeypatch.setattr(DiffPane, "load", lambda *_: None)
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
@@ -286,9 +291,9 @@ def test_diff_request_and_refresh_clear_viewer(
             app.request_diff(entry)
             assert view.loading is True
 
-            app.apply_diff_view(DiffView(lines, (17,)), app.request_id)
+            app.diff_pane.apply(DiffView(lines, (17,)), app.diff_pane.request_id)
             await pilot.pause()
-            assert app.diff_view == DiffView(lines, (17,))
+            assert app.diff_pane.diff_view == DiffView(lines, (17,))
             assert view.lines == lines
             assert view.scroll_offset == (0, 13)
             assert view.loading is False
@@ -302,7 +307,7 @@ def test_diff_request_and_refresh_clear_viewer(
 
             await pilot.press("r")
             await pilot.pause()
-            assert app.diff_view is None
+            assert app.diff_pane.diff_view is None
             assert view.lines == ()
             assert view.scroll_offset == (0, 0)
             assert view.loading is False
@@ -340,7 +345,9 @@ def test_empty_and_context_only_diffs_stay_at_origin(
             await pilot.pause()
 
             changes = () if first_change is None else (first_change,)
-            app.apply_diff_view(DiffView(lines, changes), app.request_id)
+            app.diff_pane.apply(
+                DiffView(lines, changes), app.diff_pane.request_id
+            )
             await pilot.pause()
 
             assert view.scroll_offset == (0, 0)
@@ -358,16 +365,18 @@ def test_replacing_a_scrolled_diff_resets_offsets_and_scrolls_to_first_change(
         app = GitPaneApp(tmp_path)
         async with app.run_test(size=(80, 12)) as pilot:
             view = app.query_one("#diff-view", CodeView)
-            app.apply_diff_view(
+            app.diff_pane.apply(
                 DiffView(tuple(Text("old " + "x" * 120) for _ in range(80)), (0,)),
-                app.request_id,
+                app.diff_pane.request_id,
             )
             await pilot.pause()
             view.scroll_to(20, 30, animate=False)
             await pilot.pause()
 
             replacement = tuple(Text(f"new {index}") for index in range(80))
-            app.apply_diff_view(DiffView(replacement, (9,)), app.request_id)
+            app.diff_pane.apply(
+                DiffView(replacement, (9,)), app.diff_pane.request_id
+            )
             await pilot.pause()
 
             assert "new 9" in visible_text(view)
@@ -388,7 +397,7 @@ def test_diff_wrap_transitions_preserve_progress_and_reset_horizontal_scroll(
         async with app.run_test(size=(80, 12)) as pilot:
             view = app.query_one("#diff-view", CodeView)
             lines = tuple(Text(f"{index:03} " + "x" * 120) for index in range(100))
-            app.apply_diff_view(DiffView(lines, ()), app.request_id)
+            app.diff_pane.apply(DiffView(lines, ()), app.diff_pane.request_id)
             await pilot.pause()
             view.scroll_to(20, 30, animate=False)
             await pilot.pause()
@@ -432,7 +441,7 @@ def test_loading_a_new_diff_while_wrapped_updates_the_viewer(
             view.loading = True
             lines = tuple(Text(f"new {index}") for index in range(40))
 
-            app.apply_diff_view(DiffView(lines, (17,)), app.request_id)
+            app.diff_pane.apply(DiffView(lines, (17,)), app.diff_pane.request_id)
             await pilot.pause()
 
             assert view.lines == lines
@@ -496,13 +505,13 @@ def test_older_diff_completing_late_leaves_the_newer_diff_visible(
             assert scroll[1] > 0
 
             delivered = asyncio.Event()
-            apply_diff_view = app.apply_diff_view
+            apply_diff_view = app.diff_pane.apply
 
             def recording_apply(*args: Any) -> None:
                 apply_diff_view(*args)
                 delivered.set()
 
-            monkeypatch.setattr(app, "apply_diff_view", recording_apply)
+            monkeypatch.setattr(app.diff_pane, "apply", recording_apply)
             release["old.py"].set()
             await asyncio.wait_for(delivered.wait(), timeout=5)
             await pilot.pause()
@@ -545,11 +554,11 @@ def test_diff_failure_clears_loading_and_reports_error(
                 lambda message, **_: notifications.append(message),
             )
             app.query_one("#diff-view", CodeView).loading = True
-            app.apply_diff_error(
+            app.diff_pane.apply_error(
                 subprocess.CalledProcessError(
                     1, ["git", "diff"], stderr="fatal: diff failed\n"
                 ),
-                app.request_id,
+                app.diff_pane.request_id,
             )
 
             assert app.query_one("#diff-view", CodeView).loading is False

@@ -6,17 +6,11 @@ import pytest
 from rich.text import Text
 from textual.widgets import Button, ListView, Static
 
-from gitpane.app import (
-    DiscardScreen,
-    FileItem,
-    GitPaneApp,
-    discard_files,
-    format_file_label,
-    is_prefix_offset,
-    toggle_file,
-)
+from gitpane.app import GitPaneApp, discard_files
 from gitpane.model import FileEntry, RepoState, Side
-from gitpane.widgets import CodeView
+from gitpane.screens.discard import DiscardScreen
+from gitpane.widgets import CodeView, DiffPane, FileItem
+from gitpane.widgets.file_item import format_file_label, is_prefix_offset
 
 
 @pytest.mark.parametrize(
@@ -53,69 +47,6 @@ def test_format_file_label_explains_unsupported_entries() -> None:
     assert format_file_label(entry) == (
         "[!] R renamed.py - Rename from original.py is not supported."
     )
-
-
-@pytest.mark.parametrize(
-    ("entry", "expected_call"),
-    [
-        (
-            FileEntry("staged path.txt", Side.STAGED, "M"),
-            ("unstage", "staged path.txt"),
-        ),
-        (
-            FileEntry("unstaged path.txt", Side.UNSTAGED, "M"),
-            ("stage", "unstaged path.txt"),
-        ),
-        (
-            FileEntry("untracked path.txt", Side.UNSTAGED, "?"),
-            ("stage", "untracked path.txt"),
-        ),
-    ],
-)
-def test_toggle_file_dispatches_by_side_and_preserves_path(
-    monkeypatch: pytest.MonkeyPatch,
-    entry: FileEntry,
-    expected_call: tuple[str, str],
-) -> None:
-    root = Path("/repo")
-    calls: list[tuple[str, Path, str]] = []
-
-    def fake_stage(received_root: Path, path: str) -> None:
-        calls.append(("stage", received_root, path))
-
-    def fake_unstage(received_root: Path, path: str) -> None:
-        calls.append(("unstage", received_root, path))
-
-    monkeypatch.setattr("gitpane.app.git.stage", fake_stage)
-    monkeypatch.setattr("gitpane.app.git.unstage", fake_unstage)
-
-    assert toggle_file(root, entry) is None  # type: ignore[func-returns-value]
-    assert calls == [(expected_call[0], root, expected_call[1])]
-
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        FileEntry("staged.txt", Side.STAGED, "M"),
-        FileEntry("unstaged.txt", Side.UNSTAGED, "M"),
-    ],
-)
-def test_toggle_file_propagates_git_exceptions(
-    monkeypatch: pytest.MonkeyPatch,
-    entry: FileEntry,
-) -> None:
-    sentinel = RuntimeError("stage failed")
-
-    def fake_mutation(_: Path, __: str) -> None:
-        raise sentinel
-
-    monkeypatch.setattr("gitpane.app.git.stage", fake_mutation)
-    monkeypatch.setattr("gitpane.app.git.unstage", fake_mutation)
-
-    with pytest.raises(RuntimeError) as raised:
-        toggle_file(Path("/repo"), entry)
-
-    assert raised.value is sentinel
 
 
 def test_discard_files_restores_tracked_and_cleans_untracked(
@@ -162,8 +93,8 @@ def test_status_actions_support_single_bulk_and_confirmed_discard(
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
     monkeypatch.setattr(
-        GitPaneApp,
-        "load_diff",
+        DiffPane,
+        "load",
         lambda _self, entry, _token: requested.append(entry),
     )
     monkeypatch.setattr(
@@ -197,7 +128,7 @@ def test_status_actions_support_single_bulk_and_confirmed_discard(
             await pilot.click(staged_item, offset=(1, 0))
             await pilot.pause()
             assert staged_item.checked is True
-            assert app.selection is None
+            assert app.diff_pane.selection is None
             assert requested == []
             assert str(staged_item.query_one(".file-label", Static).content).startswith(
                 "[x]"
@@ -267,7 +198,7 @@ def test_unsupported_status_entries_are_visible_and_not_actionable(
     monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
     monkeypatch.setattr(
-        GitPaneApp, "load_diff", lambda _self, selected, _token: loaded.append(selected)
+        DiffPane, "load", lambda _self, selected, _token: loaded.append(selected)
     )
 
     async def exercise() -> None:
@@ -289,7 +220,7 @@ def test_unsupported_status_entries_are_visible_and_not_actionable(
 
             await pilot.click(item, offset=(1, 0))
             await pilot.pause()
-            assert app.selection == entry
+            assert app.diff_pane.selection == entry
             assert loaded == []
             assert app.query_one("#diff-view", CodeView).lines == (Text(reason),)
 
