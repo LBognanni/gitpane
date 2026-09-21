@@ -572,3 +572,33 @@ def test_unstage_handles_existing_and_unborn_heads(
         ),
         (expected_args, {}),
     ]
+
+
+def test_git_dirs_requests_absolute_worktree_and_common_directories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, "/repo/.git/worktrees/w\n/repo/.git\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = gitpane.git.git_dirs(Path("/work/w"))
+
+    assert result == (Path("/repo/.git/worktrees/w"), Path("/repo/.git"))
+    assert calls == [
+        [
+            "git",
+            "--literal-pathspecs",
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+        ]
+    ]

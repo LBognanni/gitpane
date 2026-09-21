@@ -40,6 +40,15 @@ def repo_root(path: Path | None = None) -> Path:
     return Path(_run(path or Path.cwd(), "rev-parse", "--show-toplevel").strip())
 
 
+def git_dirs(root: Path) -> tuple[Path, Path]:
+    """Return the worktree-specific and common Git directories for *root*."""
+    output = _run(
+        root, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"
+    )
+    git_dir, common_dir = output.splitlines()
+    return Path(git_dir), Path(common_dir)
+
+
 def _parse_status(output: str, root: Path) -> RepoState:
     staged: list[FileEntry] = []
     unstaged: list[FileEntry] = []
