@@ -1,236 +1,372 @@
+import asyncio
 import math
-import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
 from rich.style import Style
+from rich.text import Text
+from textual.color import Color
+from textual.geometry import Offset
+from textual.pilot import Pilot
+from textual.selection import Selection
+from textual.widget import Widget
+from textual.widgets import Button, ListView, Static, TabbedContent, Tabs
 
-from gitpane.app import render_diff_rows
+from gitpane.app import DiffView, FileItem, GitPaneApp, render_diff_rows
 from gitpane.diff import Row
-from gitpane.model import FileEntry, Side
+from gitpane.model import FileEntry, RepoState, Side
+from gitpane.widgets import CodeView
 
-STYLESHEET = Path(__file__).resolve().parents[1] / "gitpane" / "app.tcss"
-
-
-def _stylesheet() -> str:
-    return STYLESHEET.read_text()
-
-
-def _variables(stylesheet: str) -> dict[str, str]:
-    return dict(re.findall(r"^\$(\S+):\s*(#[0-9a-f]{6});$", stylesheet, re.MULTILINE))
+TEXT_FLOOR = 4.5
+INDICATOR_FLOOR = 3.0
+LONG_PATH = "src/" + "very_long_directory_name/" * 8 + "final_file_name.py"
 
 
-def _rule(stylesheet: str, selector: str) -> str:
-    match = re.search(
-        rf"^{re.escape(selector)}\s*\{{(?P<body>.*?)^\}}",
-        stylesheet,
-        re.MULTILINE | re.DOTALL,
+def _luminance(color: Color) -> float:
+    def linear(channel: int) -> float:
+        value = channel / 255
+        if value <= 0.04045:
+            return value / 12.92
+        return math.pow((value + 0.055) / 1.055, 2.4)
+
+    return (
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
     )
-    assert match is not None, f"missing TCSS rule for {selector}"
-    return match.group("body")
 
 
-def _has_declaration(rule: str, declaration: str) -> bool:
-    return re.search(rf"^\s*{re.escape(declaration)};$", rule, re.MULTILINE) is not None
-
-
-def _luminance(color: str) -> float:
-    channels = tuple(int(color[index : index + 2], 16) / 255 for index in (1, 3, 5))
-
-    def linear(channel: float) -> float:
-        if channel <= 0.04045:
-            return channel / 12.92
-        return math.pow((channel + 0.055) / 1.055, 2.4)
-
-    red = linear(channels[0])
-    green = linear(channels[1])
-    blue = linear(channels[2])
-    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
-
-
-def _contrast(first: str, second: str) -> float:
+def _contrast(first: Color, second: Color) -> float:
     lighter, darker = sorted((_luminance(first), _luminance(second)), reverse=True)
     return (lighter + 0.05) / (darker + 0.05)
 
 
-def _rgb(color: str) -> tuple[int, int, int]:
-    return (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+def _color(color: object) -> Color:
+    """Convert a Rich color to an opaque Textual color."""
+    return Color.from_rich_color(color).with_alpha(1)
 
 
-def test_locked_semantic_palette_is_exact() -> None:
-    assert _variables(_stylesheet()) == {
-        "canvas": "#0d1117",
-        "surface": "#161b22",
-        "raised-surface": "#21262d",
-        "inactive-selection": "#30363d",
-        "text": "#f0f3f6",
-        "muted-text": "#b1bac4",
-        "border": "#6e7681",
-        "accent": "#58a6ff",
-        "focus": "#f2cc60",
-        "focused-selection": "#174ea6",
-        "addition-background": "#142b1d",
-        "removal-background": "#351b20",
-        "diff-background": "#272822",
-    }
+def _colors(style: Style) -> tuple[Color, Color]:
+    assert style.color is not None
+    assert style.bgcolor is not None
+    return _color(style.color), _color(style.bgcolor)
 
 
-@pytest.mark.parametrize(
-    ("kind", "variable"),
-    [("add", "addition-background"), ("remove", "removal-background")],
-)
-def test_renderer_diff_backgrounds_match_tcss(kind: str, variable: str) -> None:
-    row = (
-        Row(None, 1, "added", "add")
-        if kind == "add"
-        else Row(1, None, "removed", "remove")
-    )
-    line = render_diff_rows(FileEntry("example.txt", Side.STAGED, "M"), [row])[0]
-
-    expected = _rgb(_variables(_stylesheet())[variable])
-    backgrounds = [
-        span.style
-        for span in line.spans
-        if isinstance(span.style, Style)
-        and span.style.bgcolor is not None
-        and tuple(span.style.bgcolor.get_truecolor()) == expected
-    ]
-    assert len(backgrounds) == 1
-    assert backgrounds[0].color is None
+def _text_contrast(widget: Widget) -> float:
+    foreground, background = _colors(widget.rich_style)
+    return _contrast(foreground, background)
 
 
-@pytest.mark.parametrize(
-    ("selector", "declarations"),
-    [
-        ("Screen", ("background: $canvas", "color: $text")),
-        ("#body", ("background: $canvas", "color: $text")),
-        ("#sidebar", ("background: $surface",)),
-        (
-            ".panel-title,\n.viewer-title,\n#branch-status",
-            ("background: $raised-surface", "color: $muted-text", "text-style: bold"),
-        ),
-        (
-            "#staged-list,\n#unstaged-list,\n#commit-tree",
-            ("background: $surface", "color: $text", "border: solid $border"),
-        ),
-        (
-            "#diff-view,\n#preview-view",
-            (
-                "background: $diff-background",
-                "color: $text",
-                "scrollbar-color: $accent",
-            ),
-        ),
-    ],
-)
-def test_surface_rules_use_the_locked_palette(
-    selector: str, declarations: tuple[str, ...]
+def _background(widget: Widget) -> Color:
+    return _colors(widget.rich_style)[1]
+
+
+def _border_contrast(widget: Widget) -> float:
+    """Contrast between a mounted widget's top border and its own background."""
+    _, border = widget.styles.border_top
+    background = widget.background_colors[1]
+    return _contrast((background + border).with_alpha(1), background.with_alpha(1))
+
+
+def _mount(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exercise: Callable[[GitPaneApp, Pilot[None]], Awaitable[None]],
+    *,
+    staged: list[FileEntry] | None = None,
+    unstaged: list[FileEntry] | None = None,
+    size: tuple[int, int] = (100, 30),
 ) -> None:
-    rule = _rule(_stylesheet(), selector)
-    for declaration in declarations:
-        assert _has_declaration(rule, declaration)
-
-
-def test_text_selection_has_readable_foreground_and_background() -> None:
-    rule = _rule(_stylesheet(), "Screen > .screen--selection")
-
-    assert _has_declaration(rule, "background: $focused-selection")
-    assert _has_declaration(rule, "color: $text")
-
-
-def test_list_states_have_the_locked_hierarchy() -> None:
-    stylesheet = _stylesheet()
-    expected = {
-        "ListView > ListItem": ("background: $surface", "color: $text"),
-        "ListView > ListItem.-hovered": ("background: $raised-surface",),
-        "ListView > ListItem.-highlight": (
-            "background: $inactive-selection",
-            "color: $text",
-        ),
-        "ListView:focus": ("border: solid $focus",),
-        "ListView:focus > ListItem.-highlight": (
-            "background: $focused-selection",
-            "color: $text",
-            "text-style: bold",
-        ),
-    }
-
-    for selector, declarations in expected.items():
-        rule = _rule(stylesheet, selector)
-        for declaration in declarations:
-            assert _has_declaration(rule, declaration)
-
-    item_state_rules = list(
-        re.finditer(r"^([^\n{]*ListItem[^\n{]*)\s*\{", stylesheet, re.MULTILINE)
+    monkeypatch.setattr(
+        "gitpane.app.git.status",
+        lambda root: RepoState(root, staged or [], unstaged or [], "main"),
     )
-    assert item_state_rules, "missing ListItem state rules"
-    assert (
-        item_state_rules[-1].group(1).strip() == "ListView:focus > ListItem.-highlight"
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    monkeypatch.setattr(GitPaneApp, "load_diff", lambda *_: None)
+
+    async def run() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=size) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await exercise(app, pilot)
+
+    asyncio.run(run())
+
+
+def _rows(list_view: ListView) -> list[FileItem]:
+    return [item for item in list_view.children if isinstance(item, FileItem)]
+
+
+ENTRIES = [FileEntry(f"file{index}.txt", Side.UNSTAGED, "M") for index in range(3)]
+
+
+def test_surfaces_and_text_are_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        surfaces = [
+            app.screen,
+            app.query_one("#body"),
+            app.query_one("#sidebar"),
+            app.query_one("#unstaged-list"),
+            app.query_one("#diff-view"),
+            app.query_one("#branch-status"),
+            app.query_one(".panel-title-label"),
+            app.query_one(".viewer-title"),
+            app.query_one(Tabs),
+        ]
+        for widget in surfaces:
+            assert _text_contrast(widget) >= TEXT_FLOOR, widget
+
+        # Panel chrome is visually separate from the canvas it sits on.
+        assert _background(app.query_one(".viewer-title")) != _background(
+            app.query_one("#body")
+        )
+        assert _background(app.query_one("#unstaged-list")) != _background(
+            app.query_one("#body")
+        )
+
+    _mount(tmp_path, monkeypatch, exercise, unstaged=ENTRIES)
+
+
+def test_list_row_states_keep_a_readable_hierarchy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        unstaged = app.query_one("#unstaged-list", ListView)
+        first, second, third = _rows(unstaged)
+        unstaged.index = 0
+        app.set_focus(None)
+        await pilot.pause()
+        assert not unstaged.has_focus
+
+        ordinary = _background(third)
+        assert _text_contrast(third) >= TEXT_FLOOR
+
+        await pilot.hover(third)
+        await pilot.pause()
+        assert third.has_class("-hovered")
+        hovered = _background(third)
+        assert _text_contrast(third) >= TEXT_FLOOR
+
+        await pilot.hover(second)
+        await pilot.pause()
+        assert not third.has_class("-hovered")
+        highlighted = _background(first)
+        assert _text_contrast(first) >= TEXT_FLOOR
+
+        unstaged.focus()
+        await pilot.pause()
+        focused = _background(first)
+        assert _text_contrast(first) >= TEXT_FLOOR
+        assert first.rich_style.bold or first.query_one(".file-label").rich_style.bold
+        assert _border_contrast(unstaged) >= INDICATOR_FLOOR
+
+        # Hovering the focused selection must not weaken the selection.
+        await pilot.hover(first)
+        await pilot.pause()
+        assert first.has_class("-hovered")
+        assert _background(first) == focused
+
+        assert len({ordinary, hovered, highlighted, focused}) == 4
+
+    _mount(tmp_path, monkeypatch, exercise, unstaged=ENTRIES)
+
+
+def test_row_actions_are_readable_when_revealed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        unstaged = app.query_one("#unstaged-list", ListView)
+        _, second, _ = _rows(unstaged)
+        button = second.query_one(".stage-action", Button)
+
+        await pilot.hover(second)
+        await pilot.pause()
+        assert second.query_one(".file-actions").display
+        assert _text_contrast(button) >= TEXT_FLOOR
+
+    _mount(tmp_path, monkeypatch, exercise, unstaged=ENTRIES)
+
+
+def test_selected_text_is_readable_in_a_mounted_code_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        view = app.query_one("#preview-view", CodeView)
+        app.query_one(TabbedContent).active = "files-tab"
+        await pilot.pause()
+        view.set_document((Text("selected words here"),))
+        await pilot.pause()
+        plain = view.render_line(0)
+
+        app.screen.selections = {view: Selection(Offset(0, 0), Offset(8, 0))}
+        await pilot.pause()
+        strip = view.render_line(0)
+
+        selected = next(segment for segment in strip if segment.text.startswith("sel"))
+        rest = next(segment for segment in strip if "here" in segment.text)
+        assert selected.style is not None and rest.style is not None
+        assert selected.style.bgcolor != rest.style.bgcolor
+        assert plain.text == strip.text
+        foreground = _color(selected.style.color or view.rich_style.color)
+        assert _contrast(foreground, _color(selected.style.bgcolor)) >= TEXT_FLOOR
+
+    _mount(tmp_path, monkeypatch, exercise)
+
+
+def test_diff_rows_style_additions_and_removals_in_a_mounted_code_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        view = app.query_one("#diff-view", CodeView)
+        entry = FileEntry("example.txt", Side.STAGED, "M")
+        rows = [
+            Row(1, 1, "context", "context"),
+            Row(None, 2, "added", "add"),
+            Row(2, None, "removed", "remove"),
+        ]
+        view.set_document(render_diff_rows(entry, rows))
+        await pilot.pause()
+
+        backgrounds = []
+        for y, marker in enumerate(("context", "added", "removed")):
+            strip = view.render_line(y)
+            assert marker in strip.text
+            segment = next(segment for segment in strip if marker in segment.text)
+            assert segment.style is not None
+            background = _color(segment.style.bgcolor or view.rich_style.bgcolor)
+            foreground = _color(segment.style.color or view.rich_style.color)
+            assert _contrast(foreground, background) >= TEXT_FLOOR
+            backgrounds.append(background)
+
+        context, added, removed = backgrounds
+        assert len({context, added, removed}) == 3
+        assert view.render_line(1).text.startswith("+")
+        assert view.render_line(2).text.startswith("-")
+
+    _mount(tmp_path, monkeypatch, exercise)
+
+
+def test_scrollbars_are_distinguishable_from_the_code_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        view = app.query_one("#diff-view", CodeView)
+        view.set_document(tuple(Text("x" * 300) for _ in range(100)))
+        await pilot.pause()
+
+        for scrollbar in (view.vertical_scrollbar, view.horizontal_scrollbar):
+            assert scrollbar.display
+        # Derive the pair exactly as ScrollBar.render does from the view's styles.
+        track = view.styles.scrollbar_background
+        if track.a < 1:
+            track = view.background_colors[0] + track
+        thumb = track + view.styles.scrollbar_color
+        assert _contrast(thumb, track) >= INDICATOR_FLOOR
+
+    _mount(tmp_path, monkeypatch, exercise)
+
+
+def test_long_status_path_occupies_one_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        unstaged = app.query_one("#unstaged-list", ListView)
+        long, short = _rows(unstaged)
+
+        assert unstaged.size.width < len(LONG_PATH)
+        assert long.region.height == 1
+        assert long.query_one(".file-label").region.height == 1
+        assert short.region.y == long.region.y + 1
+
+    _mount(
+        tmp_path,
+        monkeypatch,
+        exercise,
+        unstaged=[
+            FileEntry(LONG_PATH, Side.UNSTAGED, "M"),
+            FileEntry("short.txt", Side.UNSTAGED, "M"),
+        ],
     )
 
 
-def test_status_list_entries_are_single_line() -> None:
-    stylesheet = _stylesheet()
+def test_long_diff_title_keeps_navigation_visible_and_right_aligned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        unstaged = app.query_one("#unstaged-list", ListView)
+        unstaged.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        app.apply_diff_view(
+            DiffView(tuple(Text(f"line {index}") for index in range(20)), (2, 10)),
+            app.request_id,
+        )
+        await pilot.pause()
 
-    assert _has_declaration(_rule(stylesheet, "ListView > ListItem"), "height: 1")
-    assert _has_declaration(
-        _rule(stylesheet, "ListView > ListItem > Static"), "text-wrap: nowrap"
+        title = app.query_one("#diff-title", Static)
+        assert str(title.content) == LONG_PATH
+        bar = app.query_one(".viewer-title")
+        actions = app.query_one(".diff-actions")
+        previous = app.query_one("#previous-change", Button)
+        following = app.query_one("#next-change", Button)
+
+        assert title.region.height == 1
+        assert title.region.width < len(LONG_PATH)
+        assert title.region.right <= actions.region.x
+        assert bar.region.height == 1
+        for button in (previous, following):
+            assert button.region.width > 0
+            assert bar.region.contains_region(button.region)
+        assert previous.region.right <= following.region.x
+        # Right aligned: only the bar's horizontal padding follows the buttons.
+        assert bar.region.right - following.region.right == bar.styles.padding.right
+
+    _mount(
+        tmp_path,
+        monkeypatch,
+        exercise,
+        unstaged=[FileEntry(LONG_PATH, Side.UNSTAGED, "M")],
     )
 
 
-def test_diff_title_reserves_space_for_right_aligned_navigation() -> None:
-    stylesheet = _stylesheet()
+def test_resizing_keeps_usable_panes_and_scrolling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        sidebar = app.query_one("#sidebar")
+        pane = app.query_one("#diff-pane")
+        view = app.query_one("#diff-view", CodeView)
+        view.set_document(tuple(Text(f"{index} " + "x" * 200) for index in range(100)))
+        await pilot.pause()
 
-    assert _has_declaration(_rule(stylesheet, ".viewer-title-label"), "width: 1fr")
-    assert _has_declaration(_rule(stylesheet, ".diff-actions"), "width: auto")
-    assert _has_declaration(
-        _rule(stylesheet, ".file-action,\n.header-action,\n.diff-action"), "width: 3"
-    )
+        for width, height in ((140, 40), (80, 24), (60, 20)):
+            await pilot.resize_terminal(width, height)
+            await pilot.pause()
+            assert sidebar.region.width >= 15
+            assert pane.region.width >= 10
+            assert sidebar.region.width + pane.region.width <= width
+            assert view.region.height > 0
+            assert view.max_scroll_y > 0
+            assert view.max_scroll_x > 0
+            assert view.vertical_scrollbar.display
+            assert view.horizontal_scrollbar.display
+            for list_view in app.query(ListView):
+                assert list_view.region.height >= 3
 
+        await pilot.press("w")
+        await pilot.pause()
+        assert view.has_class("wrapped")
+        assert view.max_scroll_x == 0
+        assert view.max_scroll_y > 0
+        assert not view.horizontal_scrollbar.display
+        assert view.virtual_size.width <= view.scrollable_content_region.width
 
-def test_layout_and_code_view_contracts_are_retained() -> None:
-    stylesheet = _stylesheet()
-    sidebar = _rule(stylesheet, "#sidebar")
-    lists = _rule(stylesheet, "#staged-list,\n#unstaged-list,\n#commit-tree")
-    code_views = _rule(stylesheet, "#diff-view,\n#preview-view")
-    wrapped_views = _rule(stylesheet, "#diff-view.wrapped,\n#preview-view.wrapped")
+        await pilot.resize_terminal(140, 40)
+        await pilot.pause()
+        assert view.max_scroll_x == 0
+        assert view.max_scroll_y > 0
 
-    assert _has_declaration(_rule(stylesheet, "#body"), "height: 1fr")
-    assert _has_declaration(sidebar, "width: 30")
-    assert _has_declaration(sidebar, "min-width: 15")
-    assert not _has_declaration(sidebar, "max-width: 30")
-    assert _has_declaration(_rule(stylesheet, ".sidebar-section"), "height: 1fr")
-    assert _has_declaration(lists, "height: 1fr")
-    assert _has_declaration(code_views, "overflow: scroll scroll")
-    assert _has_declaration(code_views, "scrollbar-color: $accent")
-    assert _has_declaration(wrapped_views, "overflow-x: hidden")
-
-
-@pytest.mark.parametrize(
-    ("first", "second"),
-    [
-        ("#f0f3f6", "#0d1117"),
-        ("#f0f3f6", "#161b22"),
-        ("#b1bac4", "#161b22"),
-        ("#f0f3f6", "#21262d"),
-        ("#f0f3f6", "#30363d"),
-        ("#f0f3f6", "#174ea6"),
-        ("#f0f3f6", "#142b1d"),
-        ("#f0f3f6", "#351b20"),
-        ("#f0f3f6", "#272822"),
-    ],
-)
-def test_locked_text_pairs_meet_contrast_floor(first: str, second: str) -> None:
-    assert _contrast(first, second) >= 4.5
-
-
-@pytest.mark.parametrize(
-    ("first", "second"),
-    [
-        ("#f2cc60", "#161b22"),
-        ("#58a6ff", "#0d1117"),
-        ("#6e7681", "#161b22"),
-    ],
-)
-def test_locked_indicator_pairs_meet_contrast_floor(first: str, second: str) -> None:
-    assert _contrast(first, second) >= 3.0
+    _mount(tmp_path, monkeypatch, exercise, unstaged=ENTRIES)
