@@ -58,7 +58,7 @@ lines scroll horizontally.
 | Hover an unstaged file and click `↶` | Discard its changes after confirmation |
 | Section-header actions | Stage, unstage, or discard all checked files |
 | Drag a divider | Resize the Changes sidebar or its sections |
-| `r` | Refresh repository status and files |
+| `r` | Manually refresh status, history and the Files tab |
 | `w` | Toggle line wrapping in the active viewer |
 | `h` | Show the keyboard shortcut popup |
 | `q` | Quit GitPane |
@@ -66,12 +66,13 @@ lines scroll horizontally.
 Mouse controls are supported throughout the interface.
 
 Use the Changes and Files tabs (or Textual's normal tab navigation) to switch
-between repository changes and the filesystem browser. Refresh reloads both.
+between repository changes and the filesystem browser. Status and history
+update automatically as the repository changes. `r` remains a manual full
+refresh; the Files tab is only refreshed by `r`, not on every edit.
 
 ## Current Scope
 
 GitPane supports whole-file staging, unstaging, and confirmed discarding; bulk
 file actions; syntax-highlighted unified diffs; and safe text-file previews up
 to 1 MiB in an accessible dark theme. It does not yet support hunk or line
-staging, commits, conflict resolution, renames, binary previews, or automatic
-file watching.
+staging, commits, conflict resolution, renames, or binary previews.

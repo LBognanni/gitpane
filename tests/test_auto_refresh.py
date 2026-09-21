@@ -369,6 +369,95 @@ def test_watcher_failure_after_startup_notifies_once(
     asyncio.run(exercise())
 
 
+def test_superseded_automatic_apply_does_not_reset_failure_streak(
+    tmp_path: Path, fake_git: FakeGit
+) -> None:
+    queue, watch = make_watcher()
+    fake_git.fail = {1, 4}
+    for i, release in enumerate(fake_git.release):
+        if i != 2:
+            release.set()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test() as pilot:
+            await wait(fake_git.started[0])
+            await app.workers.wait_for_complete()
+
+            queue.put_nowait(EDIT)
+            await wait(fake_git.started[1])
+            assert app.auto_refresh_task is not None
+            await app.auto_refresh_task
+            assert len(app._notifications) == 1
+
+            queue.put_nowait(EDIT)
+            await wait(fake_git.started[2])
+            app.refresh_status()
+            fake_git.release[2].set()
+            await app.auto_refresh_task
+            await app.workers.wait_for_complete()
+
+            queue.put_nowait(EDIT)
+            await wait(fake_git.started[4])
+            await app.auto_refresh_task
+            await pilot.pause()
+            assert len(app._notifications) == 1
+
+    asyncio.run(exercise())
+
+
+def test_unexpected_automatic_error_is_reported_and_retryable(
+    tmp_path: Path, fake_git: FakeGit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    for release in fake_git.release:
+        release.set()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test() as pilot:
+            await wait(fake_git.started[0])
+            await app.workers.wait_for_complete()
+
+            def explode(*_: object) -> RepoState:
+                raise ValueError("boom")
+
+            monkeypatch.setattr("gitpane.app.git.status", explode)
+            queue.put_nowait(EDIT)
+            while not app._notifications:
+                await asyncio.sleep(0)
+            await pilot.pause()
+            assert "boom" in next(n.message for n in app._notifications)
+
+            monkeypatch.setattr("gitpane.app.git.status", fake_git.status)
+            queue.put_nowait(EDIT)
+            while branch(app) != "Branch: call 1":
+                await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+
+def test_unexpected_watcher_error_notifies_stopped(
+    tmp_path: Path, fake_git: FakeGit
+) -> None:
+    async def dying(_: Path) -> AsyncIterator[Invalidation]:
+        yield Invalidation()
+        raise ValueError("watch broke")
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=dying)
+        async with app.run_test() as pilot:
+            await wait(fake_git.started[0])
+            await app.workers.wait_for_complete()
+            assert app.watch_task is not None
+            await app.watch_task
+            await pilot.pause()
+            messages = [n.message for n in app._notifications]
+            assert len(messages) == 1 and "stopped" in messages[0]
+
+    asyncio.run(exercise())
+
+
 def entry(path: str, status: str = "M", side: Side = Side.UNSTAGED) -> FileEntry:
     return FileEntry(path, side, status)
 
@@ -886,5 +975,95 @@ def test_quiet_reload_does_not_show_loading_while_in_flight(
             assert "b.txt version 1" in diff_text(app)
             release.set()
             await app.workers.wait_for_complete()
+
+    asyncio.run(exercise())
+
+
+def test_automatic_failure_notifies_once_per_streak_and_keeps_last_state(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    failing = [False]
+
+    def status(root: Path) -> RepoState:
+        if failing[0]:
+            raise OSError("git failed")
+        return repo.status(root)
+
+    monkeypatch.setattr("gitpane.app.git.status", status)
+
+    async def fail_once(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        queue.put_nowait(edit("b.txt"))
+        await pilot.pause()
+        assert app.auto_refresh_task is not None
+        await app.auto_refresh_task
+        await pilot.pause()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            before = labels(app, "#unstaged-list")
+            assert "b.txt version 1" in diff_text(app)
+
+            failing[0] = True
+            await fail_once(app, pilot)
+            await fail_once(app, pilot)
+            messages = [n.message for n in app._notifications]
+            assert len(messages) == 1
+            assert "Automatic refresh failed" in messages[0]
+            assert "Press r" in messages[0]
+            assert labels(app, "#unstaged-list") == before
+            assert "b.txt version 1" in diff_text(app)
+
+            failing[0] = False
+            await refresh(app, pilot, repo, queue)
+            await pilot.pause()
+            assert len(app._notifications) == 1
+
+            failing[0] = True
+            await fail_once(app, pilot)
+            assert len(app._notifications) == 2
+            assert labels(app, "#unstaged-list") == before
+
+    asyncio.run(exercise())
+
+
+def test_quiet_history_failure_warns_once_and_keeps_last_state(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    commits = [Commit("a" * 40, "aaaaaaa", None, "first")]
+    failing = [False]
+
+    def history(_: Path) -> list[Commit]:
+        if failing[0]:
+            raise OSError("log failed")
+        return commits
+
+    monkeypatch.setattr("gitpane.app.git.commits", history)
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            tree = app.query_one("#commit-tree", Tree)
+            before = labels(app, "#unstaged-list")
+            failing[0] = True
+
+            for _ in range(2):
+                await settle(
+                    app, pilot, repo, Invalidation(status=True, history=True), queue
+                )
+
+            assert [(n.severity, n.title) for n in app._notifications] == [
+                ("warning", "")
+            ]
+            assert "Automatic refresh failed" in next(
+                n.message for n in app._notifications
+            )
+            assert [str(n.label) for n in tree.root.children] == ["first aaaaaaa"]
+            assert tree.loading is False
+            assert labels(app, "#unstaged-list") == before
 
     asyncio.run(exercise())

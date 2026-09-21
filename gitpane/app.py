@@ -83,6 +83,7 @@ class GitPaneApp(App[None]):
         self.watch_task: asyncio.Task[None] | None = None
         self.auto_refresh_task: asyncio.Task[None] | None = None
         self.auto_pending: watcher.Invalidation | None = None
+        self.auto_failing: set[str] = set()
         self.root = root
         self.cwd = cwd or root
         self.show_shortcuts_on_mount = show_shortcuts
@@ -211,7 +212,7 @@ class GitPaneApp(App[None]):
                     self.auto_refresh_task = asyncio.create_task(
                         self._run_auto_refresh()
                     )
-        except OSError:
+        except Exception:  # noqa: BLE001 - never leave the task exception unretrieved
             message = (
                 "Automatic refresh stopped. Press r to refresh manually."
                 if started
@@ -226,15 +227,33 @@ class GitPaneApp(App[None]):
             token = self.status_request_id
             try:
                 state = await self._read_status(token)
-            except (subprocess.SubprocessError, OSError):
+                if state is None:
+                    # Stale: the next pass reads with the newer token.
+                    self._merge_pending(invalidation)
+                    continue
+                applied = await self.apply_status(state, token, invalidation)
+            except Exception as error:  # noqa: BLE001 - report instead of vanishing
                 # Keep the data for the next event's retry instead of spinning.
                 self._merge_pending(invalidation)
+                self._notify_auto_failure("status", error)
                 return
-            if state is None:
-                # Stale: the next pass reads with the newer token.
-                self._merge_pending(invalidation)
-            else:
-                await self.apply_status(state, token, invalidation)
+            if applied:
+                self.auto_failing.discard("status")
+
+    def _notify_auto_failure(self, kind: str, error: Exception) -> None:
+        """Warn once per continuing streak of *kind* (status or history)."""
+        if kind in self.auto_failing:
+            return
+        self.auto_failing.add(kind)
+        reason = (
+            git.error_message(error)
+            if isinstance(error, (subprocess.SubprocessError, OSError))
+            else str(error) or type(error).__name__
+        )
+        self.notify(
+            f"Automatic refresh failed: {reason}. Press r to refresh manually.",
+            severity="warning",
+        )
 
     def _merge_pending(self, invalidation: watcher.Invalidation) -> None:
         pending = self.auto_pending
@@ -371,10 +390,11 @@ class GitPaneApp(App[None]):
         state: RepoState,
         token: int,
         invalidation: watcher.Invalidation | None = None,
-    ) -> None:
+    ) -> bool:
+        """Apply *state* unless superseded; report whether it was applied."""
         async with self.status_apply_lock:
             if token != self.status_request_id:
-                return
+                return False
             if invalidation is None:
                 await self._rebuild_status(state)
                 self.diff_pane.invalidate()
@@ -386,6 +406,7 @@ class GitPaneApp(App[None]):
                 if invalidation.history:
                     self.refresh_history(quiet=True)
             self.applied_state = state
+            return True
 
     async def _rebuild_status(
         self, state: RepoState, *, preserve: bool = False
@@ -480,17 +501,24 @@ class GitPaneApp(App[None]):
                     return
                 commits = await asyncio.to_thread(git.commits, self.root)
         except (subprocess.SubprocessError, OSError) as error:
-            self.apply_history_error(error, token)
+            self.apply_history_error(error, token, quiet=quiet)
             return
         self.apply_history(commits, token, quiet=quiet)
 
     def apply_history_error(
-        self, error: subprocess.SubprocessError | OSError, token: int
+        self,
+        error: subprocess.SubprocessError | OSError,
+        token: int,
+        *,
+        quiet: bool = False,
     ) -> None:
         if token != self.history_request_id:
             return
         self.query_one("#commit-tree", Tree).loading = False
-        self._show_git_error("refresh history", error)
+        if quiet:
+            self._notify_auto_failure("history", error)
+        else:
+            self._show_git_error("refresh history", error)
 
     def apply_history(
         self, commits: list[Commit], token: int, *, quiet: bool = False
@@ -503,6 +531,8 @@ class GitPaneApp(App[None]):
         for commit in commits:
             tree.root.add(format_commit_label(commit), commit)
         tree.loading = False
+        if quiet:
+            self.auto_failing.discard("history")
         if (
             not quiet
             and commits
