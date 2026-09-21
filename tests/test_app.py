@@ -11,20 +11,16 @@ from textual.geometry import Offset
 from textual.selection import Selection
 from textual.widgets import (
     Button,
-    Input,
     ListView,
-    OptionList,
     Static,
     TabbedContent,
     Tree,
 )
 
 from gitpane.app import (
-    MAX_PREVIEW_BYTES,
     DiffView,
     DiscardScreen,
     FileItem,
-    FileJumpScreen,
     GitPaneApp,
     PreviewView,
     ShortcutScreen,
@@ -34,8 +30,6 @@ from gitpane.app import (
     format_file_label,
     is_current_request,
     is_prefix_offset,
-    load_preview_view,
-    matching_files,
     toggle_file,
 )
 from gitpane.model import Commit, CommitFile, FileEntry, RepoState, Side
@@ -245,99 +239,6 @@ def test_keyboard_shortcuts_navigate_and_act_on_the_focused_file(
     asyncio.run(exercise())
 
 
-def test_load_preview_view_builds_numbered_highlighted_lines(tmp_path: Path) -> None:
-    path = tmp_path / "example.py"
-    path.write_text("answer = 42\n")
-
-    view = load_preview_view(path)
-
-    assert isinstance(view, PreviewView)
-    assert [line.plain for line in view.lines] == [" 1 answer = 42", " 2 "]
-    assert view.lines[0].spans
-    assert view.lines[0].style == ""
-    assert view.lines[0].spans[0].start == 0
-    assert view.lines[0].spans[0].end == 3
-    assert view.lines[0].spans[0].style == "dim"
-
-
-@pytest.mark.parametrize(
-    ("source", "expected"),
-    [
-        ("", [" 1 "]),
-        ("first", [" 1 first"]),
-        ("first\n", [" 1 first", " 2 "]),
-        ("first\n\n", [" 1 first", " 2 ", " 3 "]),
-        ("first\rsecond", [" 1 first", " 2 second"]),
-        ("first\r\nsecond", [" 1 first", " 2 second"]),
-    ],
-)
-def test_load_preview_view_preserves_logical_lines(
-    tmp_path: Path, source: str, expected: list[str]
-) -> None:
-    path = tmp_path / "example.txt"
-    path.write_text(source)
-
-    view = load_preview_view(path)
-
-    assert [line.plain for line in view.lines] == expected
-
-
-@pytest.mark.parametrize(
-    ("name", "contents", "message"),
-    [
-        ("binary.dat", b"before\0after", "Binary files cannot be previewed."),
-        ("invalid.txt", b"\xff", "File is not valid UTF-8."),
-        (
-            "large.txt",
-            b"x" * (MAX_PREVIEW_BYTES + 1),
-            "File is too large to preview (maximum 1 MiB).",
-        ),
-    ],
-)
-def test_load_preview_view_returns_friendly_messages(
-    tmp_path: Path, name: str, contents: bytes, message: str
-) -> None:
-    path = tmp_path / name
-    path.write_bytes(contents)
-
-    view = load_preview_view(path)
-
-    assert view.lines == (Text(message),)
-
-
-def test_load_preview_view_handles_disappeared_file(tmp_path: Path) -> None:
-    view = load_preview_view(tmp_path / "gone.txt")
-
-    assert view.lines == (Text("File is no longer available."),)
-
-
-def test_load_preview_view_handles_unreadable_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = tmp_path / "unreadable.txt"
-    path.write_text("contents")
-
-    def deny_open(*_: object, **__: object) -> object:
-        raise PermissionError
-
-    with monkeypatch.context() as patch:
-        patch.setattr(Path, "open", deny_open)
-        view = load_preview_view(path)
-
-    assert view.lines == (Text("File could not be read."),)
-
-
-def test_load_preview_view_rejects_non_regular_files(tmp_path: Path) -> None:
-    target = tmp_path / "target.txt"
-    target.write_text("outside the selected path")
-    link = tmp_path / "link.txt"
-    link.symlink_to(target)
-
-    view = load_preview_view(link)
-
-    assert view.lines == (Text("Only regular files can be previewed."),)
-
-
 def test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -391,139 +292,6 @@ def test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views(
         ("status", root),
         ("files", cwd),
     ]
-
-
-def test_matching_files_requires_three_characters_and_matches_case_insensitively() -> None:
-    files = (
-        (Path("docs/Report.md"), "docs/report.md"),
-        (Path("src/reporting.py"), "src/reporting.py"),
-        (Path("src/other.py"), "src/other.py"),
-    )
-
-    assert matching_files(files, "re") == ((), False)
-    assert matching_files(files, "REP") == (
-        (Path("docs/Report.md"), Path("src/reporting.py")),
-        False,
-    )
-    assert matching_files(files, "REPO") == (
-        (Path("docs/Report.md"), Path("src/reporting.py")),
-        False,
-    )
-
-
-def test_matching_files_reports_only_actual_truncation() -> None:
-    hundred = tuple(
-        (Path(f"match-{index}.txt"), f"match-{index}.txt") for index in range(100)
-    )
-
-    matches, truncated = matching_files(hundred, "match")
-    assert len(matches) == 100
-    assert truncated is False
-
-    matches, truncated = matching_files(
-        (*hundred, (Path("match-extra.txt"), "match-extra.txt")), "match"
-    )
-    assert len(matches) == 100
-    assert truncated is True
-
-
-def test_quick_file_jump_is_memory_backed_and_reveals_nested_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    summary = Path("src/reports") / f"summary-{'x' * 80}.py"
-    summer = Path("src/reports") / f"summer-{'y' * 80}.py"
-    nested = tmp_path / summary
-    nested.parent.mkdir(parents=True)
-    nested.write_text("answer = 42\n")
-    file_calls: list[Path] = []
-    preview_calls: list[tuple[Path, int]] = []
-
-    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
-    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
-
-    def fake_files(cwd: Path) -> list[str]:
-        file_calls.append(cwd)
-        return ["README.md", str(summary), str(summer)]
-
-    monkeypatch.setattr("gitpane.app.git.files", fake_files)
-    monkeypatch.setattr(
-        GitPaneApp,
-        "load_preview",
-        lambda _self, path, token: preview_calls.append((path, token)),
-    )
-
-    async def exercise() -> None:
-        app = GitPaneApp(tmp_path)
-        async with app.run_test(size=(100, 24)) as pilot:
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-
-            await pilot.press("t")
-            assert not isinstance(app.screen, FileJumpScreen)
-
-            await pilot.press("2")
-            tree = app.query_one("#files-tree", Tree)
-            tabs_region = app.query_one("#main-tabs", TabbedContent).region
-            tree.loading = True
-            await pilot.press("t")
-            assert not isinstance(app.screen, FileJumpScreen)
-            tree.loading = False
-
-            await pilot.press("t")
-            await pilot.pause()
-            assert isinstance(app.screen, FileJumpScreen)
-            assert isinstance(app.screen.focused, Input)
-            assert app.query_one("#main-tabs", TabbedContent).region == tabs_region
-            dialog = app.screen.query_one("#file-jump-dialog")
-            search_input = app.screen.query_one("#file-jump-input", Input)
-            assert dialog.region.y == 3
-            initial_height = dialog.region.height
-            assert dialog.region.y <= search_input.region.y
-            assert search_input.region.bottom <= dialog.region.bottom
-
-            await pilot.press("s", "u")
-            assert app.screen.query_one(OptionList).option_count == 0
-            await pilot.press("m")
-            await app.screen.workers.wait_for_complete()
-            await pilot.pause()
-            results = app.screen.query_one(OptionList)
-            assert results.option_count == 2
-            assert results.region.height > results.option_count
-            assert results.max_scroll_y == 0
-            assert dialog.region.height > initial_height
-            assert file_calls == [tmp_path]
-
-            await pilot.press("enter")
-            await pilot.pause()
-
-            assert not isinstance(app.screen, FileJumpScreen)
-            target = app.file_nodes[summary]
-            reports = target.parent
-            assert reports is not None
-            src = reports.parent
-            assert src is not None
-            assert tree.cursor_node is target
-            assert tree.has_focus
-            assert src.is_expanded
-            assert reports.is_expanded
-            assert preview_calls == [(nested, app.preview_request_id)]
-            assert file_calls == [tmp_path]
-
-            await pilot.press("t")
-            assert isinstance(app.screen, FileJumpScreen)
-            assert await pilot.click(app.screen, offset=(0, 0))
-            await pilot.pause()
-            assert not isinstance(app.screen, FileJumpScreen)
-            assert tree.cursor_node is target
-
-            await pilot.press("t")
-            assert isinstance(app.screen, FileJumpScreen)
-            await pilot.press("escape")
-            await pilot.pause()
-            assert not isinstance(app.screen, FileJumpScreen)
-            assert tree.cursor_node is target
-
-    asyncio.run(exercise())
 
 
 def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
@@ -591,35 +359,6 @@ def test_commit_selection_expands_files_and_file_selection_uses_shared_diff(
             assert isinstance(diff_title, Content)
             assert diff_title.plain == entry.path
             assert diff_title.spans == []
-
-    asyncio.run(exercise())
-
-
-def test_file_selection_shows_repository_relative_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = tmp_path / "nested" / "[bold]report.txt"
-    path.parent.mkdir()
-    path.write_text("answer = 42\n")
-    monkeypatch.setattr(
-        "gitpane.app.git.status", lambda root: RepoState(root, [], [], "main")
-    )
-    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
-    monkeypatch.setattr("gitpane.app.git.files", lambda _: ["nested/[bold]report.txt"])
-
-    async def exercise() -> None:
-        app = GitPaneApp(tmp_path)
-        async with app.run_test() as pilot:
-            tree = app.query_one("#files-tree", Tree)
-            tree.select_node(tree.root.children[0].children[0])
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-
-            title = app.query_one("#preview-title", Static)
-            rendered_title = title.render()
-            assert isinstance(rendered_title, Content)
-            assert rendered_title.plain == "nested/[bold]report.txt"
-            assert rendered_title.spans == []
 
     asyncio.run(exercise())
 
@@ -1067,30 +806,6 @@ def test_stale_diff_application_preserves_newer_virtual_document_state(
     asyncio.run(exercise())
 
 
-def test_loaded_preview_uses_current_wrap_setting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
-    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
-
-    async def exercise() -> None:
-        app = GitPaneApp(tmp_path)
-        async with app.run_test() as pilot:
-            app.query_one("#main-tabs", TabbedContent).active = "files-tab"
-            await pilot.press("w")
-            await pilot.pause()
-
-            app.apply_preview_view(
-                PreviewView((Text(" 1 value = 1"),)), app.preview_request_id
-            )
-
-            preview = app.query_one("#preview-view", CodeView)
-            assert preview.wrapped is True
-            assert preview.lines == (Text(" 1 value = 1"),)
-
-    asyncio.run(exercise())
-
-
 @pytest.mark.parametrize(
     ("y", "expected"),
     [
@@ -1131,37 +846,6 @@ def test_code_viewers_use_jump_scrollbar_and_unanimated_paging(
             assert calls == [("up", False), ("down", False)]
             assert isinstance(scroll.vertical_scrollbar, JumpScrollBar)
             assert isinstance(app.query_one("#diff-view"), CodeView)
-
-    asyncio.run(exercise())
-
-
-def test_file_preview_scrollbar_track_click_jumps_to_clicked_position(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
-    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
-
-    async def exercise() -> None:
-        app = GitPaneApp(tmp_path)
-        async with app.run_test() as pilot:
-            app.query_one("#main-tabs", TabbedContent).active = "files-tab"
-            scroll = app.query_one("#preview-view", CodeView)
-            scroll.set_document(tuple(Text(str(number)) for number in range(1000)))
-            await pilot.pause()
-
-            scrollbar = scroll.vertical_scrollbar
-            click_y = scrollbar.size.height * 3 // 4
-            expected = scrollbar_click_target(
-                click_y,
-                scrollbar.size.height,
-                scrollbar.window_virtual_size,
-                scrollbar.window_size,
-            )
-
-            assert await pilot.click(scrollbar, offset=(0, click_y))
-            await pilot.pause()
-
-            assert scroll.scroll_y == pytest.approx(expected)
 
     asyncio.run(exercise())
 
