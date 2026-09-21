@@ -5,22 +5,8 @@ from pathlib import Path
 import pytest
 from textual.widgets import ListView, Static, Tree
 
-from gitpane.app import GitPaneApp, is_current_request
+from gitpane.app import FileItem, GitPaneApp
 from gitpane.model import Commit, FileEntry, RepoState, Side
-
-
-@pytest.mark.parametrize(
-    ("token", "current", "expected"),
-    [
-        (3, 3, True),
-        (2, 3, False),
-        (4, 3, False),
-    ],
-)
-def test_is_current_request_matches_only_the_current_token(
-    token: int, current: int, expected: bool
-) -> None:
-    assert is_current_request(token, current) is expected
 
 
 def test_status_refresh_runs_git_off_the_event_thread(
@@ -60,37 +46,109 @@ def test_status_refresh_runs_git_off_the_event_thread(
     asyncio.run(exercise())
 
 
-def test_refresh_apply_methods_ignore_stale_results(
+def test_superseded_refresh_results_are_never_displayed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "gitpane.app.git.status", lambda root: RepoState(root, [], [], "current")
-    )
-    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
-    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    """A refresh superseded while running never reaches the panes."""
+    started = {
+        "status": [threading.Event(), threading.Event()],
+        "commits": [threading.Event(), threading.Event()],
+        "files": [threading.Event(), threading.Event()],
+    }
+    release_older = threading.Event()
+    release_newer = threading.Event()
+    calls = {"status": 0, "commits": 0, "files": 0}
+
+    def status(root: Path) -> RepoState:
+        calls["status"] += 1
+        started["status"][calls["status"] - 1].set()
+        if calls["status"] == 1:
+            assert release_older.wait(timeout=5)
+            return RepoState(
+                root, [FileEntry("old.txt", Side.STAGED, "M")], [], "older"
+            )
+        assert release_newer.wait(timeout=5)
+        return RepoState(root, [], [FileEntry("new.txt", Side.UNSTAGED, "M")], "newer")
+
+    def commits(_: Path) -> list[Commit]:
+        calls["commits"] += 1
+        started["commits"][calls["commits"] - 1].set()
+        if calls["commits"] == 1:
+            assert release_older.wait(timeout=5)
+            return [Commit("a" * 40, "aaaaaaa", None, "Older commit")]
+        assert release_newer.wait(timeout=5)
+        return [Commit("b" * 40, "bbbbbbb", None, "Newer commit")]
+
+    def files(_: Path) -> list[str]:
+        calls["files"] += 1
+        started["files"][calls["files"] - 1].set()
+        if calls["files"] == 1:
+            assert release_older.wait(timeout=5)
+            return ["older.txt"]
+        assert release_newer.wait(timeout=5)
+        return ["newer.txt"]
+
+    monkeypatch.setattr("gitpane.app.git.status", status)
+    monkeypatch.setattr("gitpane.app.git.commits", commits)
+    monkeypatch.setattr("gitpane.app.git.files", files)
+
+    def visible_text(app: GitPaneApp) -> str:
+        """Return the text the repository panes currently show."""
+        parts = [
+            str(app.query_one("#branch-status", Static).content),
+            *(item.entry.path for item in app.query(FileItem)),
+        ]
+        for tree_id in ("#commit-tree", "#files-tree"):
+            parts.extend(
+                str(node.label) for node in app.query_one(tree_id, Tree).root.children
+            )
+        return "\n".join(parts)
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
-        async with app.run_test():
-            stale_status = RepoState(
-                tmp_path,
-                [FileEntry("stale.txt", Side.STAGED, "M")],
-                [],
-                "stale",
-            )
-            await app.apply_status(stale_status, app.status_request_id - 1)
-            app.apply_history(
-                [Commit("stale", "stale", None, "Stale")],
-                app.history_request_id - 1,
-            )
-            app.apply_files([Path("stale.txt")], app.files_request_id - 1)
+        async with app.run_test() as pilot:
+            for first, _ in started.values():
+                assert await asyncio.to_thread(first.wait, 5)
+
+            app.refresh_status()
+            app.refresh_history()
+            app.refresh_files()
+            await pilot.pause()
+
+            release_older.set()
+            for _, second in started.values():
+                assert await asyncio.to_thread(second.wait, 5)
+            await pilot.pause()
+            await pilot.pause()
+
+            superseded = visible_text(app)
+            assert "older" not in superseded
+            assert "old.txt" not in superseded
+            assert "Older commit" not in superseded
+
+            release_newer.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
 
             assert str(app.query_one("#branch-status", Static).content) == (
-                "Branch: current"
+                "Branch: newer"
             )
-            assert not app.query_one("#staged-list", ListView).children
-            assert not app.query_one("#commit-tree", Tree).root.children
-            assert not app.query_one("#files-tree", Tree).root.children
+            staged = app.query_one("#staged-list", ListView)
+            unstaged = app.query_one("#unstaged-list", ListView)
+            assert not staged.children
+            assert [item.entry.path for item in unstaged.query(FileItem)] == ["new.txt"]
+            commit_labels = [
+                str(node.label)
+                for node in app.query_one("#commit-tree", Tree).root.children
+            ]
+            assert len(commit_labels) == 1
+            assert "Newer commit" in commit_labels[0]
+            file_labels = [
+                str(node.label)
+                for node in app.query_one("#files-tree", Tree).root.children
+            ]
+            assert len(file_labels) == 1
+            assert "newer.txt" in file_labels[0]
 
     asyncio.run(exercise())
 

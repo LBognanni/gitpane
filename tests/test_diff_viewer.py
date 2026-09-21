@@ -1,17 +1,23 @@
 import asyncio
 import subprocess
+import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 from rich.text import Text
 from textual import events
 from textual.geometry import Offset
 from textual.selection import Selection
-from textual.widgets import Button, TabbedContent
+from textual.widgets import Button, Static, TabbedContent
 
 from gitpane.app import DiffView, GitPaneApp, PreviewView
 from gitpane.model import FileEntry, RepoState, Side
 from gitpane.widgets import CodeView, JumpScrollBar, scrollbar_click_target
+
+
+def visible_text(view: CodeView) -> str:
+    return "\n".join(view.render_line(y).text for y in range(view.size.height))
 
 
 def test_wrap_toggle_applies_independently_to_each_viewer(
@@ -413,46 +419,76 @@ def test_loading_a_new_diff_while_wrapped_updates_the_viewer(
     asyncio.run(exercise())
 
 
-def test_stale_diff_application_preserves_newer_virtual_document_state(
+def diff_patch(path: str, marker: str, changed: int) -> str:
+    """Return a realistic 100-line one-hunk patch changing one line."""
+    body = [f" {marker} context {index}" for index in range(100)]
+    body[changed] = f"-{marker} old {changed}\n+{marker} new {changed}"
+    return (
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        "@@ -1,100 +1,100 @@\n" + "\n".join(body) + "\n"
+    )
+
+
+def test_older_diff_completing_late_leaves_the_newer_diff_visible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
     monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    started = {"old.py": threading.Event(), "new.py": threading.Event()}
+    release = {"old.py": threading.Event(), "new.py": threading.Event()}
+    patches = {
+        "old.py": diff_patch("old.py", "older", 5),
+        "new.py": diff_patch("new.py", "newer", 60),
+    }
+
+    def delayed_diff(_: Path, entry: FileEntry) -> str:
+        started[entry.path].set()
+        assert release[entry.path].wait(timeout=5)
+        return patches[entry.path]
+
+    monkeypatch.setattr("gitpane.app.git.diff", delayed_diff)
 
     async def exercise() -> None:
         app = GitPaneApp(tmp_path)
-        async with app.run_test(size=(80, 12)) as pilot:
-            app.request_id += 1
-            current = app.request_id
-            newer = DiffView(
-                tuple(Text(f"new {index} " + "x" * 120) for index in range(100)),
-                (20,),
-            )
-            app.apply_diff_view(newer, current)
-            await pilot.pause()
+        async with app.run_test(size=(100, 20)) as pilot:
+            await app.workers.wait_for_complete()
             view = app.query_one("#diff-view", CodeView)
-            view.scroll_to(20, 30, animate=False)
+
+            app.request_diff(FileEntry("old.py", Side.UNSTAGED, "M"))
+            assert await asyncio.to_thread(started["old.py"].wait, 5)
+            app.request_diff(FileEntry("new.py", Side.UNSTAGED, "M"))
+            assert await asyncio.to_thread(started["new.py"].wait, 5)
+
+            release["new.py"].set()
+            await app.workers.wait_for_complete()
             await pilot.pause()
             await pilot.press("w")
             await pilot.pause()
             view.scroll_to(0, 10, animate=False)
-            view.loading = True
-            state = (
-                app.diff_view,
-                view.lines,
-                view.document_generation,
-                view.scroll_offset,
-            )
+            await pilot.pause()
+            visible = visible_text(view)
+            scroll = view.scroll_offset
+            assert "newer" in visible
+            assert scroll[1] > 0
 
-            app.apply_diff_view(DiffView((Text("old"),), (0,)), current - 1)
+            delivered = asyncio.Event()
+            apply_diff_view = app.apply_diff_view
 
-            assert (
-                app.diff_view,
-                view.lines,
-                view.document_generation,
-                view.scroll_offset,
-            ) == state
-            assert view.loading is True
+            def recording_apply(*args: Any) -> None:
+                apply_diff_view(*args)
+                delivered.set()
+
+            monkeypatch.setattr(app, "apply_diff_view", recording_apply)
+            release["old.py"].set()
+            await asyncio.wait_for(delivered.wait(), timeout=5)
+            await pilot.pause()
+
+            assert str(app.query_one("#diff-title", Static).content) == "new.py"
+            assert view.wrapped is True
+            assert view.scroll_offset == scroll
+            assert visible_text(view) == visible
+            assert "older" not in visible_text(view)
 
     asyncio.run(exercise())
 
