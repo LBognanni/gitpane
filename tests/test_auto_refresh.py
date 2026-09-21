@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import ListView, Static
+from textual.widgets import ListView, Static, Tree
 
 import gitpane.app as app_module
 from gitpane.app import GitPaneApp
-from gitpane.model import FileEntry, RepoState, Side
+from gitpane.model import Commit, FileEntry, RepoState, Side
 from gitpane.watcher import Invalidation
 from gitpane.widgets import CodeView, FileItem
 
@@ -594,5 +594,297 @@ def test_changed_status_keeps_restored_highlight_visible_in_scrolled_list(
                 item.virtual_region.bottom
                 <= top + unstaged.scrollable_content_region.height
             )
+
+    asyncio.run(exercise())
+
+
+MISSING = "The selected change is no longer present."
+
+
+async def settle(
+    app: GitPaneApp,
+    pilot: Pilot[None],
+    repo: Repo,
+    event: Invalidation,
+    queue: asyncio.Queue[Invalidation],
+) -> None:
+    before = repo.calls
+    queue.put_nowait(event)
+    while repo.calls == before:
+        await pilot.pause()
+    assert app.auto_refresh_task is not None
+    await app.auto_refresh_task
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def test_editing_selected_unstaged_path_reloads_but_other_paths_do_not(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            repo.version = 2
+            await settle(app, pilot, repo, edit("a.txt"), queue)
+            assert "b.txt version 1" in diff_text(app)
+
+            await settle(app, pilot, repo, edit("b.txt"), queue)
+            assert "b.txt version 2" in diff_text(app)
+            assert app.query_one("#diff-view", CodeView).loading is False
+            assert highlighted(app, "#unstaged-list") == "b.txt"
+
+    asyncio.run(exercise())
+
+
+def test_index_change_reloads_selected_staged_diff_only(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+    repo.staged = [entry("s.txt", side=Side.STAGED)]
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert "s.txt version 1" in diff_text(app)
+
+            repo.version = 2
+            await settle(app, pilot, repo, edit("s.txt"), queue)
+            assert "s.txt version 1" in diff_text(app)
+
+            index = Invalidation(status=True, index_changed=True)
+            await settle(app, pilot, repo, index, queue)
+            assert "s.txt version 2" in diff_text(app)
+
+    asyncio.run(exercise())
+
+
+def test_committed_selection_is_cleared_without_selecting_a_replacement(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+    repo.staged = [entry("b.txt", side=Side.STAGED)]
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert "b.txt version 1" in diff_text(app)
+
+            # Committed: staged identity gone; unstaged b.txt (same path) remains.
+            repo.staged = []
+            commit = Invalidation(status=True, history=True, index_changed=True)
+            await settle(app, pilot, repo, commit, queue)
+
+            text = diff_text(app)
+            assert MISSING in text
+            assert "version" not in text
+            assert str(app.query_one("#diff-title", Static).content) == ""
+
+    asyncio.run(exercise())
+
+
+def test_surviving_selection_stays_after_status_changes(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            repo.unstaged = [entry("b.txt", "D"), entry("d.txt", "?")]
+            await settle(app, pilot, repo, edit("a.txt"), queue)
+            assert "b.txt version 1" in diff_text(app)
+            assert MISSING not in diff_text(app)
+
+    asyncio.run(exercise())
+
+
+def test_ref_change_refreshes_history_without_moving_focus_or_selecting(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    commits = [[Commit("a" * 40, "aaaaaaa", None, "first")]]
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: commits[0])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            unstaged = app.query_one("#unstaged-list", ListView)
+            tree = app.query_one("#commit-tree", Tree)
+            assert app.focused is unstaged
+            assert len(tree.root.children) == 1
+
+            commits[0] = [Commit("b" * 40, "bbbbbbb", "a" * 40, "second"), *commits[0]]
+            await settle(
+                app, pilot, repo, Invalidation(status=True, history=True), queue
+            )
+
+            assert [str(n.label) for n in tree.root.children] == [
+                "second bbbbbbb",
+                "first aaaaaaa",
+            ]
+            assert tree.loading is False
+            assert app.focused is unstaged
+            assert "b.txt version 1" in diff_text(app)
+
+    asyncio.run(exercise())
+
+
+def test_superseded_diff_result_cannot_replace_reconciled_state(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked(root: Path, target: FileEntry) -> str:
+                started.set()
+                assert release.wait(timeout=5)
+                return repo.diff(root, target)
+
+            monkeypatch.setattr("gitpane.app.git.diff", blocked)
+            repo.version = 2
+            queue.put_nowait(edit("b.txt"))
+            await wait(started)
+            assert app.auto_refresh_task is not None
+            await app.auto_refresh_task
+
+            # The change is committed while the reload is still in flight.
+            repo.unstaged = [entry("a.txt"), entry("c.txt")]
+            before = repo.calls
+            queue.put_nowait(edit("x"))
+            while repo.calls == before:
+                await pilot.pause()
+            await app.auto_refresh_task
+            await pilot.pause()
+            assert MISSING in diff_text(app)
+
+            release.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert MISSING in diff_text(app)
+            assert "version" not in diff_text(app)
+
+    asyncio.run(exercise())
+
+
+def test_soft_reset_history_change_reloads_selected_staged_diff(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+    repo.staged = [entry("s.txt", side=Side.STAGED)]
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+            repo.version = 2
+            head = Invalidation(status=True, history=True)
+            await settle(app, pilot, repo, head, queue)
+            assert "s.txt version 2" in diff_text(app)
+
+    asyncio.run(exercise())
+
+
+def test_ordinary_edit_does_not_refresh_history(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        "gitpane.app.git.commits", lambda root: calls.append(root) or []
+    )
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            assert len(calls) == 1
+            await settle(app, pilot, repo, edit("b.txt"), queue)
+            assert len(calls) == 1
+
+    asyncio.run(exercise())
+
+
+def test_quiet_reload_superseding_a_normal_request_clears_loading(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            viewer = app.query_one("#diff-view", CodeView)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked(root: Path, target: FileEntry) -> str:
+                started.set()
+                assert release.wait(timeout=5)
+                return repo.diff(root, target)
+
+            monkeypatch.setattr("gitpane.app.git.diff", blocked)
+            app.request_diff(entry("a.txt"))
+            await wait(started)
+            assert viewer.loading is True
+
+            repo.version = 2
+            release.set()
+            await settle(app, pilot, repo, edit("a.txt"), queue)
+
+            assert viewer.loading is False
+            assert "a.txt version 2" in diff_text(app)
+
+    asyncio.run(exercise())
+
+
+def test_quiet_reload_does_not_show_loading_while_in_flight(
+    tmp_path: Path, repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            viewer = app.query_one("#diff-view", CodeView)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked(root: Path, target: FileEntry) -> str:
+                started.set()
+                assert release.wait(timeout=5)
+                return repo.diff(root, target)
+
+            monkeypatch.setattr("gitpane.app.git.diff", blocked)
+            queue.put_nowait(edit("b.txt"))
+            await wait(started)
+            await pilot.pause()
+            assert viewer.loading is False
+            assert "b.txt version 1" in diff_text(app)
+            release.set()
+            await app.workers.wait_for_complete()
 
     asyncio.run(exercise())

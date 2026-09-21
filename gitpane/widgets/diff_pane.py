@@ -73,14 +73,60 @@ class DiffPane(Vertical):
         self.query_one("#diff-view", CodeView).loading = True
         self.load(entry, self.request_id)
 
+    def reload(self, entry: DiffEntry | None = None) -> None:
+        """Quietly reload the selection, keeping scroll and change position."""
+        entry = entry or self.selection
+        if entry is None:
+            return
+        if isinstance(entry, FileEntry) and entry.unsupported_reason is not None:
+            self.request(entry)
+            return
+        self.selection = entry
+        self.request_id += 1
+        self.load(entry, self.request_id, quiet=True)
+
     @work(thread=True, exclusive=True, group="diff")
-    def load(self, entry: DiffEntry, token: int) -> None:
+    def load(self, entry: DiffEntry, token: int, quiet: bool = False) -> None:
         try:
             view = load_diff_view(self.root, entry)
         except (subprocess.SubprocessError, OSError) as error:
-            self.app.call_from_thread(self.apply_error, error, token)
+            if quiet:
+                self.app.call_from_thread(self.stop_quiet_loading, token)
+            else:
+                self.app.call_from_thread(self.apply_error, error, token)
             return
-        self.app.call_from_thread(self.apply, view, token)
+        apply = self.apply_quiet if quiet else self.apply
+        self.app.call_from_thread(apply, view, token)
+
+    def apply_quiet(self, view: DiffView, token: int) -> None:
+        """Replace the document, keeping scroll and a still-valid change index."""
+        if token != self.request_id:
+            return
+        viewer = self.query_one("#diff-view", CodeView)
+        viewer.loading = False
+        if view == self.diff_view:
+            return
+        self.diff_view = view
+        if self.change_index is None or self.change_index >= len(view.changes):
+            self.change_index = 0 if view.changes else None
+        self._update_navigation()
+        x, y = viewer.scroll_offset
+        viewer.set_document(view.lines)
+        viewer.scroll_to(
+            min(x, viewer.max_scroll_x), min(y, viewer.max_scroll_y), animate=False
+        )
+
+    def stop_quiet_loading(self, token: int) -> None:
+        """Clear a loading indicator left by a superseded normal request."""
+        if token == self.request_id:
+            self.stop_loading()
+
+    def show_missing(self) -> None:
+        """Drop the selection and explain that its change is gone."""
+        self.invalidate()
+        self.query_one("#diff-view", CodeView).set_document(
+            (Text("The selected change is no longer present."),)
+        )
 
     def apply_error(
         self, error: subprocess.SubprocessError | OSError, token: int

@@ -215,8 +215,7 @@ class GitPaneApp(App[None]):
             message = (
                 "Automatic refresh stopped. Press r to refresh manually."
                 if started
-                else "Automatic refresh could not start. "
-                "Press r to refresh manually."
+                else "Automatic refresh could not start. Press r to refresh manually."
             )
             self.notify(message, severity="warning")
 
@@ -384,6 +383,8 @@ class GitPaneApp(App[None]):
                 if state != self.applied_state:
                     await self._rebuild_status(state, preserve=True)
                 self._reload_changed_diff(state, invalidation)
+                if invalidation.history:
+                    self.refresh_history(quiet=True)
             self.applied_state = state
 
     async def _rebuild_status(
@@ -452,22 +453,27 @@ class GitPaneApp(App[None]):
         entries = state.staged if selection.side is Side.STAGED else state.unstaged
         current = next((e for e in entries if e.path == selection.path), None)
         if current is None:
+            self.diff_pane.show_missing()
             return
         if selection.side is Side.STAGED:
-            stale = invalidation.index_changed
+            stale = invalidation.index_changed or invalidation.history
         else:
-            stale = Path(selection.path) in invalidation.changed_paths
+            stale = (
+                Path(selection.path) in invalidation.changed_paths
+                or invalidation.history
+            )
         if stale:
-            self.diff_pane.request(current)
+            self.diff_pane.reload(current)
 
-    def refresh_history(self) -> None:
+    def refresh_history(self, *, quiet: bool = False) -> None:
         self.history_request_id += 1
         self.commit_files_request_id += 1
-        self.query_one("#commit-tree", Tree).loading = True
-        self.load_history(self.history_request_id)
+        if not quiet:
+            self.query_one("#commit-tree", Tree).loading = True
+        self.load_history(self.history_request_id, quiet)
 
     @work(group="history")
-    async def load_history(self, token: int) -> None:
+    async def load_history(self, token: int, quiet: bool = False) -> None:
         try:
             async with self.history_lock:
                 if token != self.history_request_id:
@@ -476,7 +482,7 @@ class GitPaneApp(App[None]):
         except (subprocess.SubprocessError, OSError) as error:
             self.apply_history_error(error, token)
             return
-        self.apply_history(commits, token)
+        self.apply_history(commits, token, quiet=quiet)
 
     def apply_history_error(
         self, error: subprocess.SubprocessError | OSError, token: int
@@ -486,7 +492,9 @@ class GitPaneApp(App[None]):
         self.query_one("#commit-tree", Tree).loading = False
         self._show_git_error("refresh history", error)
 
-    def apply_history(self, commits: list[Commit], token: int) -> None:
+    def apply_history(
+        self, commits: list[Commit], token: int, *, quiet: bool = False
+    ) -> None:
         if token != self.history_request_id:
             return
         self.commit_files_request_id += 1
@@ -496,7 +504,8 @@ class GitPaneApp(App[None]):
             tree.root.add(format_commit_label(commit), commit)
         tree.loading = False
         if (
-            commits
+            not quiet
+            and commits
             and not self.query_one("#staged-list", ListView).children
             and not self.query_one("#unstaged-list", ListView).children
         ):

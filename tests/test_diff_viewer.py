@@ -166,9 +166,7 @@ def test_diff_change_buttons_navigate_and_disable_at_endpoints(
         app = GitPaneApp(tmp_path)
         async with app.run_test(size=(80, 12)) as pilot:
             lines = tuple(Text(f"line {index} " + "x" * 100) for index in range(100))
-            app.diff_pane.apply(
-                DiffView(lines, (10, 30, 70)), app.diff_pane.request_id
-            )
+            app.diff_pane.apply(DiffView(lines, (10, 30, 70)), app.diff_pane.request_id)
             await pilot.pause()
             previous = app.query_one("#previous-change", Button)
             next_change = app.query_one("#next-change", Button)
@@ -345,9 +343,7 @@ def test_empty_and_context_only_diffs_stay_at_origin(
             await pilot.pause()
 
             changes = () if first_change is None else (first_change,)
-            app.diff_pane.apply(
-                DiffView(lines, changes), app.diff_pane.request_id
-            )
+            app.diff_pane.apply(DiffView(lines, changes), app.diff_pane.request_id)
             await pilot.pause()
 
             assert view.scroll_offset == (0, 0)
@@ -374,9 +370,7 @@ def test_replacing_a_scrolled_diff_resets_offsets_and_scrolls_to_first_change(
             await pilot.pause()
 
             replacement = tuple(Text(f"new {index}") for index in range(80))
-            app.diff_pane.apply(
-                DiffView(replacement, (9,)), app.diff_pane.request_id
-            )
+            app.diff_pane.apply(DiffView(replacement, (9,)), app.diff_pane.request_id)
             await pilot.pause()
 
             assert "new 9" in visible_text(view)
@@ -447,6 +441,79 @@ def test_loading_a_new_diff_while_wrapped_updates_the_viewer(
             assert view.lines == lines
             assert view.scroll_y == view.source_to_visual_row(13)
             assert view.loading is False
+
+    asyncio.run(exercise())
+
+
+def test_quiet_reload_keeps_scroll_clamped_wrap_and_change_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    def document(count: int) -> tuple[Text, ...]:
+        return tuple(Text(f"line {index}") for index in range(count))
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.workers.wait_for_complete()
+            pane = app.diff_pane
+            view = app.query_one("#diff-view", CodeView)
+            await pilot.press("w")
+            pane.apply(DiffView(document(100), (10, 30, 70)), pane.request_id)
+            await pilot.pause()
+            pane.navigate(1)
+            view.scroll_to(0, 40, animate=False)
+            await pilot.pause()
+
+            longer = DiffView(document(120), (10, 30, 70))
+            pane.request_id += 1
+            pane.apply_quiet(longer, pane.request_id)
+            await pilot.pause()
+            assert view.scroll_offset == (0, 40)
+            assert pane.change_index == 1
+            assert view.wrapped is True
+            assert view.loading is False
+
+            shorter = DiffView(document(30), (10,))
+            pane.request_id += 1
+            pane.apply_quiet(shorter, pane.request_id)
+            await pilot.pause()
+            assert view.scroll_y == view.max_scroll_y < 40
+            assert pane.change_index == 0
+            assert "line 29" in visible_text(view)
+
+    asyncio.run(exercise())
+
+
+def test_quiet_reload_of_an_equal_diff_leaves_the_document_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gitpane.app.git.status", lambda root: RepoState(root, [], []))
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await app.workers.wait_for_complete()
+            pane = app.diff_pane
+            view = app.query_one("#diff-view", CodeView)
+            lines = tuple(Text(f"line {index}") for index in range(100))
+            pane.apply(DiffView(lines, (10,)), pane.request_id)
+            await pilot.pause()
+            view.scroll_to(0, 20, animate=False)
+            await pilot.pause()
+            generation = view.document_generation
+
+            pane.request_id += 1
+            pane.apply_quiet(DiffView(lines, (10,)), pane.request_id)
+            await pilot.pause()
+
+            assert view.document_generation == generation
+            assert view.scroll_offset == (0, 20)
 
     asyncio.run(exercise())
 
