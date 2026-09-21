@@ -467,7 +467,7 @@ boot, real repository, or real Git invocation is part of verification.
 | Story | Status | Depends on | Primary deliverable |
 | --- | --- | --- | --- |
 | BT-S1 — Diff rendering split | Accepted | — | Focused rendering module and scoped cache fixture |
-| BT-S2 — Preview/file-jump split | Planned | BT-S1 | Focused preview and jump modules |
+| BT-S2 — Preview/file-jump split | Accepted | BT-S1 | Focused preview and jump modules |
 | BT-S3 — Complete app split | Planned | BT-S2 | Viewer, status, and concurrency modules |
 | BT-S4 — Mounted theme outcomes | Planned | BT-S3 | Presentation tests connected to rendered UI |
 | BT-S5 — Diff output contracts | Planned | BT-S4 | Behavioral preparation/render/cache coverage |
