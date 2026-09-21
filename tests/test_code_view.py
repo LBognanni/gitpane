@@ -8,7 +8,7 @@ from textual.geometry import Offset, Size
 from textual.selection import Selection
 from textual.strip import Strip
 
-from gitpane.widgets import CodeView, JumpScrollBar, scrollbar_click_target
+from gitpane.widgets import CodeView, scrollbar_click_target
 
 
 class CodeViewApp(App[None]):
@@ -16,20 +16,26 @@ class CodeViewApp(App[None]):
         yield CodeView(id="code")
 
 
-def test_set_document_sets_virtual_size_resets_scroll_and_bumps_generation() -> None:
-    view = CodeView()
-    lines = (Text("x\t界"), Text("longest"))
+def visible_text(view: CodeView) -> str:
+    return "\n".join(view.render_line(y).text for y in range(view.size.height))
 
-    view.set_document(lines)
 
-    assert view.lines == lines
-    assert view.virtual_size == Size(10, 2)
-    assert view.scroll_offset == (0, 0)
-    assert view.document_generation == 1
+def test_set_document_displays_content_and_extent() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(6, 2)) as pilot:
+            view = app.query_one(CodeView)
+            view.set_document((Text("x\t界"), Text("longest"), Text("third")))
+            await pilot.pause()
 
-    view.set_document(lines)
+            assert view.virtual_size == Size(10, 3)
+            region = view.scrollable_content_region
+            assert view.max_scroll_x == 10 - region.width
+            assert view.max_scroll_y == 3 - region.height
+            assert visible_text(view).splitlines()[0].startswith("x   ")
+            assert view.scroll_offset == (0, 0)
 
-    assert view.document_generation == 2
+    asyncio.run(exercise())
 
 
 def test_render_line_crops_and_preserves_source_and_row_styles() -> None:
@@ -135,33 +141,36 @@ def test_wide_unicode_uses_cell_width_and_crops_by_cells() -> None:
     asyncio.run(exercise())
 
 
-def test_large_document_repaint_requests_only_visible_rows() -> None:
-    class RecordingCodeView(CodeView):
-        requested: list[int]
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.requested = []
+def test_repaint_work_is_bounded_by_viewport_not_document_length() -> None:
+    class CountingCodeView(CodeView):
+        rendered_rows = 0
 
         def render_line(self, y: int) -> Strip:
-            self.requested.append(y + int(self.scroll_y))
+            self.rendered_rows += 1
             return super().render_line(y)
 
-    class RecordingApp(App[None]):
+    class CountingApp(App[None]):
         def compose(self) -> ComposeResult:
-            yield RecordingCodeView()
+            yield CountingCodeView()
+
+    async def rendered_rows_for(line_count: int) -> tuple[int, int, str]:
+        app = CountingApp()
+        async with app.run_test(size=(20, 4)) as pilot:
+            view = app.query_one(CountingCodeView)
+            await pilot.pause()
+            view.rendered_rows = 0
+            view.set_document(tuple(Text(str(index)) for index in range(line_count)))
+            await pilot.pause()
+            return view.rendered_rows, view.size.height, view.render_line(0).text
 
     async def exercise() -> None:
-        app = RecordingApp()
-        async with app.run_test(size=(20, 4)) as pilot:
-            view = app.query_one(RecordingCodeView)
-            view.set_document(tuple(Text(str(index)) for index in range(1_000)))
-            await pilot.pause()
+        small, height, _ = await rendered_rows_for(10)
+        large, large_height, first_row = await rendered_rows_for(10_000)
 
-            assert view.requested
-            assert len(set(view.requested)) < len(view.lines)
-            assert max(view.requested) < view.size.height
-            assert isinstance(view.vertical_scrollbar, JumpScrollBar)
+        assert large_height == height
+        assert first_row.startswith("0")
+        assert 0 < small
+        assert 0 < large <= max(small, height) * 2
 
     asyncio.run(exercise())
 
@@ -180,32 +189,36 @@ def test_document_replacement_renders_new_same_sized_content() -> None:
             await pilot.pause()
 
             assert view.virtual_size == Size(40, 100)
-            visible_output = "\n".join(
-                Strip.join(line).text
-                for line in app.screen._compositor.render_full_update().strips
-            )
-            assert "y" in visible_output
-            assert "x" not in visible_output
+            assert visible_text(view) == "\n".join(["y" * 8] * 3)
 
     asyncio.run(exercise())
 
 
-def test_equal_document_replacement_resets_scrolling_and_bumps_generation() -> None:
+def test_equal_document_replacement_resets_viewport() -> None:
     async def exercise() -> None:
         app = CodeViewApp()
         async with app.run_test(size=(8, 3)) as pilot:
             view = app.query_one(CodeView)
-            view.set_document(tuple(Text("x" * 40) for _ in range(100)))
+
+            def document() -> tuple[Text, ...]:
+                return tuple(Text(f"{row:03}" + "x" * 40) for row in range(100))
+
+            view.set_document(document())
             await pilot.pause()
             view.scroll_to(20, 50, animate=False)
             await pilot.pause()
-            assert view.scroll_offset == (20, 50)
+            assert visible_text(view) == "\n".join(["x" * 8] * 3)
 
-            view.set_document(tuple(Text("x" * 40) for _ in range(100)))
+            view.set_document(document())
             await pilot.pause()
 
             assert view.scroll_offset == (0, 0)
-            assert view.document_generation == 2
+            assert view.max_scroll_y == 100 - view.scrollable_content_region.height
+            assert visible_text(view).splitlines() == [
+                "000xxxxx",
+                "001xxxxx",
+                "002xxxxx",
+            ]
 
     asyncio.run(exercise())
 
@@ -265,23 +278,24 @@ def test_scrollbar_target_handles_empty_and_short_documents() -> None:
     assert scrollbar_click_target(0, 10, 2, 5) == 0
 
 
-def test_page_actions_are_unanimated(monkeypatch: pytest.MonkeyPatch) -> None:
-    view = CodeView()
-    calls: list[tuple[str, bool]] = []
+def test_page_keys_move_the_viewport_immediately() -> None:
+    async def exercise() -> None:
+        app = CodeViewApp()
+        async with app.run_test(size=(8, 4)) as pilot:
+            view = app.query_one(CodeView)
+            view.set_document(tuple(Text(f"{row:03}") for row in range(30)))
+            await pilot.pause()
+            view.focus()
+            page_height = view.scrollable_content_region.height
 
-    def page_up(*, animate: bool) -> None:
-        calls.append(("up", animate))
+            await pilot.press("pagedown")
+            assert view.scroll_y == page_height
+            assert view.render_line(0).text.rstrip() == f"{page_height:03}"
 
-    def page_down(*, animate: bool) -> None:
-        calls.append(("down", animate))
+            await pilot.press("pageup")
+            assert view.scroll_y == 0
 
-    monkeypatch.setattr(view, "scroll_page_up", page_up)
-    monkeypatch.setattr(view, "scroll_page_down", page_down)
-
-    view.action_page_up()
-    view.action_page_down()
-
-    assert calls == [("up", False), ("down", False)]
+    asyncio.run(exercise())
 
 
 def test_wrapping_maps_source_rows_and_preserves_progress() -> None:
@@ -383,7 +397,10 @@ def test_wrapped_document_indents_continuations_without_a_gutter_only_row() -> N
             view.set_wrapped(True)
             await pilot.pause()
 
-            rendered = [line.plain for line in view._visual_lines]
+            rendered = [
+                view.render_line(y).text.rstrip()
+                for y in range(view.virtual_size.height)
+            ]
             assert rendered[0].startswith(" 1 abc")
             assert all(line.startswith("   ") for line in rendered[1:])
             assert all(line.strip() for line in rendered)
@@ -391,7 +408,7 @@ def test_wrapped_document_indents_continuations_without_a_gutter_only_row() -> N
     asyncio.run(exercise())
 
 
-def test_wrapped_resize_preserves_source_row_and_selection() -> None:
+def test_wrapped_resize_preserves_visible_source_and_selection() -> None:
     async def exercise() -> None:
         app = CodeViewApp()
         async with app.run_test(size=(16, 4)) as pilot:
@@ -400,20 +417,21 @@ def test_wrapped_resize_preserves_source_row_and_selection() -> None:
             view.set_document(lines)
             view.set_wrapped(True)
             await pilot.pause()
-            old_row = view.source_to_visual_row(1) + 2
-            view.scroll_to(y=old_row, animate=False)
-            old_offset = view._visual_source_offsets[old_row]
-            app.screen.selections = {view: Selection(Offset(0, 2), Offset(3, 2))}
+            view.scroll_to(y=view.source_to_visual_row(1) + 2, animate=False)
+            await pilot.pause()
+            selection = Selection(Offset(0, 2), Offset(3, 2))
+            app.screen.selections = {view: selection}
+            selected_before = view.get_selection(selection)
+            top_before = view.render_line(0).text.strip()
+            assert selected_before == ("tar", "\n")
+            assert set(top_before) == {"x"}
 
             await pilot.resize_terminal(10, 4)
 
-            assert view._visual_source_rows[int(view.scroll_y)] == 1
-            assert view._visual_source_offsets[int(view.scroll_y)] <= old_offset
-            next_row = int(view.scroll_y) + 1
-            if view._visual_source_rows[next_row] == 1:
-                assert view._visual_source_offsets[next_row] > old_offset
-            assert app.screen.selections == {
-                view: Selection(Offset(0, 2), Offset(3, 2))
-            }
+            top_after = view.render_line(0).text.strip()
+            assert set(top_after) == set(top_before) == {"x"}
+            assert len(top_after) < len(top_before)
+            assert view.get_selection(selection) == selected_before
+            assert app.screen.selections == {view: selection}
 
     asyncio.run(exercise())
