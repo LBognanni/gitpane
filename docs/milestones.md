@@ -474,4 +474,24 @@ boot, real repository, or real Git invocation is part of verification.
 | BT-S6 — CodeView outcomes | Accepted | BT-S5 | Public rendering, selection, and viewport coverage |
 | BT-S7 — Controlled stale work | Accepted | BT-S6 | Newest-result-wins concurrency workflows |
 | BT-S8 — Mixed workflow trim | Accepted | BT-S7 | Visible application outcomes without internal proxies |
-| BT-S9 — Final audit/cleanup | Planned | BT-S1–BT-S8 | Passing gates and completed milestone record |
+| BT-S9 — Final audit/cleanup | Accepted | BT-S1–BT-S8 | Passing gates and completed milestone record |
+
+## Completion notes
+
+All stories accepted; audit searches and quality gates pass.
+
+Follow-ups for a separately planned milestone (not fixed here, since product
+code was out of scope):
+
+- The focus border on `#staged-list`, `#unstaged-list`, and `#commit-tree`
+  never appears: their ID-selector `border` rule outranks `ListView:focus`.
+  No test asserts a focus indicator until this is fixed.
+- The muted action button on a focused, highlighted row has about 3.99
+  contrast, below the 4.5 text floor. Only the hovered variant is tested.
+- Status/history/files loaders hold their locks across the Git call, so an
+  older result can never finish after a newer one. Stale-drop is proved by
+  checking that a superseded result is never displayed, not by literal
+  out-of-order completion.
+- Two formatting-only commits outside the tests were made at the user's
+  request so `ruff format --check .` passes (`tests/test_git.py`,
+  `gitpane/app.py`).
