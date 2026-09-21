@@ -4,12 +4,14 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
-from textual.widgets import Static
+from textual.pilot import Pilot
+from textual.widgets import ListView, Static
 
 import gitpane.app as app_module
 from gitpane.app import GitPaneApp
 from gitpane.model import FileEntry, RepoState, Side
 from gitpane.watcher import Invalidation
+from gitpane.widgets import CodeView, FileItem
 
 
 class FakeGit:
@@ -363,5 +365,234 @@ def test_watcher_failure_after_startup_notifies_once(
             assert len(messages) == 1
             assert "stopped" in messages[0]
             assert "Press r" in messages[0]
+
+    asyncio.run(exercise())
+
+
+def entry(path: str, status: str = "M", side: Side = Side.UNSTAGED) -> FileEntry:
+    return FileEntry(path, side, status)
+
+
+class Repo:
+    """Mutable mocked repository whose diff text encodes a version counter."""
+
+    def __init__(self, unstaged: list[FileEntry], staged: list[FileEntry]) -> None:
+        self.unstaged = unstaged
+        self.staged = staged
+        self.calls = 0
+        self.version = 1
+
+    def status(self, root: Path) -> RepoState:
+        self.calls += 1
+        return RepoState(root, list(self.staged), list(self.unstaged), "main")
+
+    def diff(self, _: Path, target: FileEntry) -> str:
+        body = [f" context {i}" for i in range(20)]
+        body[3] = f"-old\n+{target.path} version {self.version}"
+        return (
+            f"diff --git a/{target.path} b/{target.path}\n"
+            f"--- a/{target.path}\n+++ b/{target.path}\n"
+            "@@ -1,20 +1,20 @@\n" + "\n".join(body) + "\n"
+        )
+
+
+@pytest.fixture
+def repo(monkeypatch: pytest.MonkeyPatch) -> Repo:
+    repo = Repo([entry("a.txt"), entry("b.txt"), entry("c.txt")], [])
+    monkeypatch.setattr("gitpane.app.git.status", repo.status)
+    monkeypatch.setattr("gitpane.app.git.diff", repo.diff)
+    monkeypatch.setattr("gitpane.app.git.commits", lambda _: [])
+    monkeypatch.setattr("gitpane.app.git.files", lambda _: [])
+    return repo
+
+
+def labels(app: GitPaneApp, selector: str) -> list[str]:
+    view = app.query_one(selector, ListView)
+    return [
+        str(item.query_one(".file-label", Static).content) for item in view.children
+    ]
+
+
+def highlighted(app: GitPaneApp, selector: str) -> str:
+    item = app.query_one(selector, ListView).highlighted_child
+    assert isinstance(item, FileItem)
+    return item.entry.path
+
+
+def diff_text(app: GitPaneApp) -> str:
+    view = app.query_one("#diff-view", CodeView)
+    return "\n".join(view.render_line(y).text for y in range(view.size.height))
+
+
+async def refresh(
+    app: GitPaneApp, pilot: Pilot[None], repo: Repo, queue: asyncio.Queue[Invalidation]
+) -> None:
+    """Deliver an event and wait for its automatic refresh to be applied."""
+    before = repo.calls
+    queue.put_nowait(edit("b.txt"))
+    while repo.calls == before:
+        await pilot.pause()
+    assert app.auto_refresh_task is not None
+    await app.auto_refresh_task
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def select_checked_b(app: GitPaneApp, pilot: Pilot[None]) -> None:
+    await app.workers.wait_for_complete()
+    await pilot.press("j", "space", "enter")
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def test_equal_status_leaves_lists_selection_focus_and_diff_untouched(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            unstaged = app.query_one("#unstaged-list", ListView)
+            items = list(unstaged.children)
+            focused = app.focused
+            assert focused is unstaged
+            assert "b.txt version 1" in diff_text(app)
+
+            repo.version = 2
+            queue.put_nowait(
+                Invalidation(status=True, changed_paths=frozenset({Path("z")}))
+            )
+            before = repo.calls
+            while repo.calls == before:
+                await pilot.pause()
+            assert app.auto_refresh_task is not None
+            await app.auto_refresh_task
+            await pilot.pause()
+
+            assert list(unstaged.children) == items
+            assert labels(app, "#unstaged-list")[1] == "[x] M b.txt"
+            assert highlighted(app, "#unstaged-list") == "b.txt"
+            assert app.focused is unstaged
+            assert unstaged.loading is False
+            assert "b.txt version 1" in diff_text(app)
+
+    asyncio.run(exercise())
+
+
+def test_changed_status_updates_lists_and_restores_surviving_state(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            await pilot.press("j", "space", "k")
+            assert labels(app, "#unstaged-list") == [
+                "[ ] M a.txt",
+                "[x] M b.txt",
+                "[x] M c.txt",
+            ]
+
+            # a.txt is staged externally, c.txt disappears, d.txt is new,
+            # and b.txt changes from M to D.
+            repo.staged = [entry("a.txt", side=Side.STAGED)]
+            repo.unstaged = [entry("b.txt", "D"), entry("d.txt", "?")]
+            await refresh(app, pilot, repo, queue)
+
+            assert labels(app, "#staged-list") == ["[ ] M a.txt"]
+            assert labels(app, "#unstaged-list") == ["[x] D b.txt", "[ ] ? d.txt"]
+            assert highlighted(app, "#unstaged-list") == "b.txt"
+            assert app.focused is app.query_one("#unstaged-list")
+            assert app.query_one("#stage-selected").disabled is False
+            assert app.query_one("#unstaged-list").loading is False
+
+    asyncio.run(exercise())
+
+
+def test_background_refresh_does_not_steal_focus_or_select_first_entry(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press("j")
+            app.query_one("#commit-tree").focus()
+            repo.staged = [entry("x.txt", side=Side.STAGED)]
+            await refresh(app, pilot, repo, queue)
+
+            assert labels(app, "#staged-list") == ["[ ] M x.txt"]
+            assert app.focused is app.query_one("#commit-tree")
+            assert highlighted(app, "#unstaged-list") == "b.txt"
+
+    asyncio.run(exercise())
+
+
+def test_equal_status_with_changed_selected_path_reloads_diff_only(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await select_checked_b(app, pilot)
+            unstaged = app.query_one("#unstaged-list", ListView)
+            items = list(unstaged.children)
+
+            repo.version = 2
+            queue.put_nowait(edit("a.txt"))
+            before = repo.calls
+            while repo.calls == before:
+                await pilot.pause()
+            assert app.auto_refresh_task is not None
+            await app.auto_refresh_task
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert "b.txt version 1" in diff_text(app)
+
+            await refresh(app, pilot, repo, queue)
+
+            assert "b.txt version 2" in diff_text(app)
+            assert list(unstaged.children) == items
+            assert labels(app, "#unstaged-list")[1] == "[x] M b.txt"
+
+    asyncio.run(exercise())
+
+
+def test_changed_status_keeps_restored_highlight_visible_in_scrolled_list(
+    tmp_path: Path, repo: Repo
+) -> None:
+    queue, watch = make_watcher()
+    repo.unstaged = [entry(f"f{i:02}.txt") for i in range(40)]
+
+    async def exercise() -> None:
+        app = GitPaneApp(tmp_path, watch_source=watch)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            unstaged = app.query_one("#unstaged-list", ListView)
+            unstaged.index = 30
+            await pilot.pause()
+            assert unstaged.scroll_y > 0
+
+            repo.unstaged = repo.unstaged[10:]
+            await refresh(app, pilot, repo, queue)
+
+            assert highlighted(app, "#unstaged-list") == "f30.txt"
+            item = unstaged.highlighted_child
+            assert item is not None
+            top = unstaged.scroll_y
+            assert top > 0
+            assert top <= item.virtual_region.y
+            assert (
+                item.virtual_region.bottom
+                <= top + unstaged.scrollable_content_region.height
+            )
 
     asyncio.run(exercise())

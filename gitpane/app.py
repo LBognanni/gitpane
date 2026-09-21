@@ -87,6 +87,7 @@ class GitPaneApp(App[None]):
         self.cwd = cwd or root
         self.show_shortcuts_on_mount = show_shortcuts
         self.status_request_id = 0
+        self.applied_state: RepoState | None = None
         self.history_request_id = 0
         self.commit_files_request_id = 0
         self.mutation_lock = asyncio.Lock()
@@ -375,23 +376,89 @@ class GitPaneApp(App[None]):
         async with self.status_apply_lock:
             if token != self.status_request_id:
                 return
-            staged_list = self.query_one("#staged-list", ListView)
-            unstaged_list = self.query_one("#unstaged-list", ListView)
-            await staged_list.clear()
-            await unstaged_list.clear()
-            await staged_list.extend(FileItem(entry) for entry in state.staged)
-            await unstaged_list.extend(FileItem(entry) for entry in state.unstaged)
-            staged_list.loading = False
-            unstaged_list.loading = False
-            self._update_bulk_actions()
-            self.query_one("#branch-status", Static).update(f"Branch: {state.branch}")
-            self.diff_pane.invalidate()
-            if state.staged:
-                staged_list.index = 0
-                staged_list.focus()
-            elif state.unstaged:
-                unstaged_list.index = 0
-                unstaged_list.focus()
+            if invalidation is None:
+                await self._rebuild_status(state)
+                self.diff_pane.invalidate()
+                self._focus_first_entry(state)
+            else:
+                if state != self.applied_state:
+                    await self._rebuild_status(state, preserve=True)
+                self._reload_changed_diff(state, invalidation)
+            self.applied_state = state
+
+    async def _rebuild_status(
+        self, state: RepoState, *, preserve: bool = False
+    ) -> None:
+        staged_list = self.query_one("#staged-list", ListView)
+        unstaged_list = self.query_one("#unstaged-list", ListView)
+        lists = (staged_list, unstaged_list)
+        captured = [self._capture_list(view) for view in lists]
+        for view in lists:
+            await view.clear()
+        await staged_list.extend(FileItem(entry) for entry in state.staged)
+        await unstaged_list.extend(FileItem(entry) for entry in state.unstaged)
+        if preserve:
+            for view, (highlighted, checked) in zip(lists, captured):
+                self._restore_list(view, highlighted, checked)
+        staged_list.loading = False
+        unstaged_list.loading = False
+        self._update_bulk_actions()
+        self.query_one("#branch-status", Static).update(f"Branch: {state.branch}")
+
+    @staticmethod
+    def _capture_list(
+        view: ListView,
+    ) -> tuple[tuple[Side, str] | None, set[tuple[Side, str]]]:
+        items = [item for item in view.children if isinstance(item, FileItem)]
+        highlighted = view.highlighted_child
+        return (
+            (highlighted.entry.side, highlighted.entry.path)
+            if isinstance(highlighted, FileItem)
+            else None,
+            {(item.entry.side, item.entry.path) for item in items if item.checked},
+        )
+
+    @staticmethod
+    def _restore_list(
+        view: ListView,
+        highlighted: tuple[Side, str] | None,
+        checked: set[tuple[Side, str]],
+    ) -> None:
+        for index, item in enumerate(view.children):
+            if not isinstance(item, FileItem):
+                continue
+            identity = (item.entry.side, item.entry.path)
+            if identity == highlighted:
+                view.index = index
+            if identity in checked:
+                item.toggle_checked()
+
+    def _focus_first_entry(self, state: RepoState) -> None:
+        if state.staged:
+            target = self.query_one("#staged-list", ListView)
+        elif state.unstaged:
+            target = self.query_one("#unstaged-list", ListView)
+        else:
+            return
+        target.index = 0
+        target.focus()
+
+    def _reload_changed_diff(
+        self, state: RepoState, invalidation: watcher.Invalidation
+    ) -> None:
+        selection = self.diff_pane.selection
+        if not isinstance(selection, FileEntry):
+            return
+        entries = state.staged if selection.side is Side.STAGED else state.unstaged
+        current = next((e for e in entries if e.path == selection.path), None)
+        if current is None:
+            return
+        if selection.side is Side.STAGED:
+            stale = invalidation.index_changed
+        else:
+            stale = Path(selection.path) in invalidation.changed_paths
+        if stale:
+            self.diff_pane.request(current)
 
     def refresh_history(self) -> None:
         self.history_request_id += 1
