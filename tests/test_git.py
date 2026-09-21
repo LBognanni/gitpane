@@ -389,7 +389,7 @@ def test_commits_requests_at_most_100_from_current_branch(
                 "--format=%H%x00%h%x00%P%x00%s",
             ),
             {},
-        )
+        ),
     ]
 
 
