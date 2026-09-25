@@ -6,7 +6,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget};
 
 use crate::app::{
-    Action, App, Button, Focus, MAX_FILE_JUMP_RESULTS, Modal, Severity, Tab, Target, TreeRow,
+    Action, App, Button, FileNode, Focus, MAX_FILE_JUMP_RESULTS, Modal, Severity, Tab, Target,
+    TreeRow,
 };
 use crate::code_view::CodeView;
 use crate::icons;
@@ -45,7 +46,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let buf = frame.buffer_mut();
     buf.set_style(area, Style::new().fg(theme::TEXT).bg(theme::CANVAS));
     let [tabs, body, status] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
@@ -89,9 +90,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     );
 }
 
+/// Textual-style tabs: padded labels over a `━` underline that highlights the active tab.
 fn render_tabs(app: &mut App, area: Rect, buf: &mut Buffer) {
     buf.set_style(area, Style::new().fg(theme::MUTED_TEXT).bg(theme::SURFACE));
     let mut x = area.x;
+    let mut active = (area.x, area.x);
     for (tab, label) in [(Tab::Changes, " Changes "), (Tab::Files, " Files ")] {
         let style = if app.tab == tab {
             Style::new()
@@ -104,8 +107,30 @@ fn render_tabs(app: &mut App, area: Rect, buf: &mut Buffer) {
         let width = (label.len() as u16).min(area.right().saturating_sub(x));
         let rect = Rect::new(x, area.y, width, 1);
         Span::styled(label, style).render(rect, buf);
-        app.hits.push((rect, Target::Tab(tab)));
+        app.hits
+            .push((Rect { height: 2, ..rect }, Target::Tab(tab)));
+        if app.tab == tab {
+            active = (x, x + width);
+        }
         x += width;
+    }
+    // The bar is dim outside the active tab, with half bars at its edges.
+    if area.height < 2 {
+        return;
+    }
+    let y = area.y + 1;
+    let dim = Style::new().fg(theme::INACTIVE_SELECTION);
+    for x in area.x..area.right() {
+        let (symbol, style) = if (active.0..active.1).contains(&x) {
+            ("━", Style::new().fg(theme::PRIMARY))
+        } else if x + 1 == active.0 {
+            ("╸", dim)
+        } else if x == active.1 {
+            ("╺", dim)
+        } else {
+            ("━", dim)
+        };
+        buf[(x, y)].set_symbol(symbol).set_style(style);
     }
 }
 
@@ -421,7 +446,7 @@ fn commit_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
             TreeRow::Commit(commit) => {
                 let node = &tree.nodes[commit];
                 let mut line = format_commit_label(&node.commit);
-                let marker = if node.expanded { "▾ " } else { "▸ " };
+                let marker = if node.expanded { EXPANDED } else { COLLAPSED };
                 line.spans.insert(0, Span::raw(marker));
                 line
             }
@@ -462,6 +487,7 @@ fn file_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
             .max((cursor + 1).saturating_sub(height));
     }
     let tree = &app.files;
+    let guides = tree_guides(&tree.nodes);
     let mut hits = Vec::new();
     for (row, &index) in rows.iter().enumerate().skip(tree.offset).take(height) {
         let rect = Rect {
@@ -471,12 +497,17 @@ fn file_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
         };
         let node = &tree.nodes[index];
         let mut line = if node.dir {
-            icons::folder_label(&node.name, node.expanded)
+            let mut line = icons::folder_label(&node.name, node.expanded);
+            let marker = if node.expanded { EXPANDED } else { COLLAPSED };
+            line.spans.insert(0, Span::raw(marker));
+            line
         } else {
             icons::file_label(&node.name)
         };
-        line.spans
-            .insert(0, Span::raw("   ".repeat(node.depth.saturating_sub(1))));
+        line.spans.insert(
+            0,
+            Span::styled(guides[index].clone(), Style::new().fg(theme::BORDER)),
+        );
         let style = if tree.cursor == Some(index) {
             Style::new()
                 .fg(theme::TEXT)
@@ -490,6 +521,41 @@ fn file_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
         hits.push((rect, Target::FileRow(row)));
     }
     app.hits.extend(hits);
+}
+
+/// Textual's Tree expand/collapse indicators.
+const EXPANDED: &str = "▼ ";
+const COLLAPSED: &str = "▶ ";
+
+/// Textual-style guide prefix (three cells per level) for each node of a
+/// depth-annotated preorder list, where depth 0 is the root.
+fn tree_guides(nodes: &[FileNode]) -> Vec<String> {
+    // A node is last when no later sibling follows before its parent ends.
+    let mut is_last = vec![false; nodes.len()];
+    let mut later_sibling: Vec<bool> = Vec::new();
+    for (index, node) in nodes.iter().enumerate().rev() {
+        later_sibling.resize(node.depth + 1, false);
+        is_last[index] = !later_sibling[node.depth];
+        later_sibling[node.depth] = true;
+    }
+    let mut ancestors_last: Vec<bool> = Vec::new();
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            ancestors_last.truncate(node.depth);
+            let mut guide: String = ancestors_last
+                .iter()
+                .skip(1)
+                .map(|&last| if last { "   " } else { "│  " })
+                .collect();
+            if node.depth > 0 {
+                guide.push_str(if is_last[index] { "└─ " } else { "├─ " });
+            }
+            ancestors_last.push(is_last[index]);
+            guide
+        })
+        .collect()
 }
 
 /// The three-cell label of an icon button.
@@ -610,7 +676,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 fn render_shortcuts(app: &mut App, area: Rect, buf: &mut Buffer) {
     let lines = SHORTCUTS.lines().count() as u16;
     // Border, padding, title, margins, and the Close button around the text.
-    let height = lines + 8;
+    let height = lines + 10;
     let dialog = centered(area, SHORTCUTS_WIDTH.min(area.width * 9 / 10), height);
     Clear.render(dialog, buf);
     let block = Block::bordered()
@@ -620,7 +686,7 @@ fn render_shortcuts(app: &mut App, area: Rect, buf: &mut Buffer) {
     let inner = block.inner(dialog);
     block.render(dialog, buf);
     let [text, button] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(inner);
     let mut content = vec![
         Line::styled(
             "Keyboard Shortcuts",
@@ -631,17 +697,16 @@ fn render_shortcuts(app: &mut App, area: Rect, buf: &mut Buffer) {
     content.extend(SHORTCUTS.lines().map(Line::from));
     Paragraph::new(content).render(text, buf);
     let close = Rect {
-        width: 7.min(button.width),
+        width: BUTTON_WIDTH.min(button.width),
         ..button
     };
-    Span::styled(
-        " Close ",
-        Style::new()
-            .fg(theme::TEXT)
-            .bg(theme::FOCUSED_SELECTION)
-            .add_modifier(Modifier::BOLD),
-    )
-    .render(close, buf);
+    dialog_button(
+        "Close",
+        Style::new().fg(theme::TEXT).bg(theme::FOCUSED_SELECTION),
+        true,
+        close,
+        buf,
+    );
     app.hits.push((close, Target::CloseShortcuts));
 }
 
@@ -661,7 +726,7 @@ fn render_discard(
     let width = DISCARD_WIDTH.min(area.width * 9 / 10);
     let text = wrap(&message, width.saturating_sub(6) as usize);
     // Border, padding, title, the message with its margins, and the buttons.
-    let dialog = centered(area, width, text.len() as u16 + 8);
+    let dialog = centered(area, width, text.len() as u16 + 10);
     Clear.render(dialog, buf);
     let block = Block::bordered()
         .border_style(Style::new().fg(theme::BORDER))
@@ -670,7 +735,7 @@ fn render_discard(
     let inner = block.inner(dialog);
     block.render(dialog, buf);
     let [body, buttons] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(inner);
     let mut lines = vec![
         Line::styled(
             "Discard Changes?",
@@ -680,39 +745,68 @@ fn render_discard(
     ];
     lines.extend(text.into_iter().map(Line::from));
     Paragraph::new(lines).render(body, buf);
-    // Right-aligned: ` Cancel `, a gap, then ` Discard `.
+    // Right-aligned: Cancel, a gap, then Discard.
     let [_, cancel, _, discard] = Layout::horizontal([
         Constraint::Fill(1),
-        Constraint::Length(8),
+        Constraint::Length(BUTTON_WIDTH),
         Constraint::Length(1),
-        Constraint::Length(9),
+        Constraint::Length(BUTTON_WIDTH),
     ])
     .areas(buttons);
-    let focused = |on: bool| {
-        if on {
-            Modifier::BOLD | Modifier::REVERSED
-        } else {
-            Modifier::empty()
-        }
-    };
-    Span::styled(
-        " Cancel ",
-        Style::new()
-            .fg(theme::TEXT)
-            .bg(theme::INACTIVE_SELECTION)
-            .add_modifier(focused(!confirm)),
-    )
-    .render(cancel, buf);
-    Span::styled(
-        " Discard ",
-        Style::new()
-            .fg(theme::CANVAS)
-            .bg(theme::DANGER)
-            .add_modifier(focused(confirm)),
-    )
-    .render(discard, buf);
+    dialog_button(
+        "Cancel",
+        Style::new().fg(theme::TEXT).bg(theme::INACTIVE_SELECTION),
+        !confirm,
+        cancel,
+        buf,
+    );
+    dialog_button(
+        "Discard",
+        Style::new().fg(theme::CANVAS).bg(theme::DANGER),
+        confirm,
+        discard,
+        buf,
+    );
     app.hits.push((cancel, Target::CancelDiscard));
     app.hits.push((discard, Target::ConfirmDiscard));
+}
+
+/// Textual's default button width.
+const BUTTON_WIDTH: u16 = 16;
+
+/// A Textual-style button in `area` (three rows): a bold centered label between
+/// a lighter `▔` top edge and a darker `▁` bottom edge; focus reverses the label.
+fn dialog_button(label: &str, style: Style, focused: bool, area: Rect, buf: &mut Buffer) {
+    let background = style.bg.unwrap_or(theme::SURFACE);
+    let shade = |amount: f32| match background {
+        Color::Rgb(r, g, b) => {
+            let mix = |c: u8| {
+                let target = if amount > 0.0 { 255.0 } else { 0.0 };
+                (c as f32 + (target - c as f32) * amount.abs()) as u8
+            };
+            Color::Rgb(mix(r), mix(g), mix(b))
+        }
+        other => other,
+    };
+    buf.set_style(area, style);
+    let [top, middle, bottom] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
+    let edge = |symbol: &str, color: Color, row: Rect, buf: &mut Buffer| {
+        if row.height == 0 {
+            return;
+        }
+        for x in row.left()..row.right() {
+            buf[(x, row.y)].set_symbol(symbol).set_fg(color);
+        }
+    };
+    edge("▔", shade(0.3), top, buf);
+    edge("▁", shade(-0.3), bottom, buf);
+    let mut label_style = style.add_modifier(Modifier::BOLD);
+    if focused {
+        label_style = label_style.add_modifier(Modifier::REVERSED);
+    }
+    Line::styled(format!(" {label} "), label_style)
+        .centered()
+        .render(middle, buf);
 }
 
 /// The file jump dialog, three rows from the top: input, results, and a truncation note.
@@ -726,37 +820,55 @@ fn render_file_jump(
     let (matches, truncated) = app.jump_matches();
     let top = area.y + 3;
     let available = area.bottom().saturating_sub(top);
-    // Borders, the input, and the truncation note surround the results.
-    let visible = (matches.len() as u16).min(available.saturating_sub(3 + truncated as u16));
+    // Like Python: a borderless three-row input, then at most height - 7 results.
+    let visible = (matches.len() as u16)
+        .min(area.height.saturating_sub(7))
+        .min(available.saturating_sub(3 + truncated as u16));
     let height = (visible + 3 + truncated as u16).min(available);
-    let width = JUMP_WIDTH.min(area.width);
+    let width = JUMP_WIDTH.min(area.width * 9 / 10);
     let dialog = Rect::new(area.x + (area.width - width) / 2, top, width, height);
     Clear.render(dialog, buf);
-    let block = Block::bordered()
-        .border_style(Style::new().fg(theme::BORDER))
-        .style(Style::new().fg(theme::TEXT).bg(theme::RAISED_SURFACE));
-    let inner = block.inner(dialog);
-    block.render(dialog, buf);
+    buf.set_style(
+        dialog,
+        Style::new().fg(theme::TEXT).bg(theme::RAISED_SURFACE),
+    );
     app.hits.push((dialog, Target::JumpDialog));
     let [input, results, note] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(3),
         Constraint::Length(visible),
         Constraint::Length(truncated as u16),
     ])
-    .areas(inner);
+    .areas(dialog);
+    buf.set_style(input, Style::new().fg(theme::TEXT).bg(theme::SURFACE));
+    // Padding 1 1 0 1: the text sits on the second row, one cell in.
+    let line = Rect {
+        x: input.x + 1,
+        y: input.y + 1,
+        width: input.width.saturating_sub(2),
+        height: 1,
+    };
     let text = if query.is_empty() {
-        Span::styled("Jump to file", Style::new().add_modifier(Modifier::DIM))
+        Span::styled(
+            "Jump to file",
+            Style::new()
+                .fg(theme::MUTED_TEXT)
+                .add_modifier(Modifier::DIM),
+        )
     } else {
         Span::raw(query.to_string())
     };
-    let input_style = if selected.is_none() {
-        Style::new().bg(theme::SURFACE).add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().bg(theme::SURFACE)
-    };
-    buf.set_style(input, input_style);
-    text.patch_style(input_style).render(input, buf);
-    let offset = selected.map_or(0, |s| (s + 1).saturating_sub(visible as usize));
+    text.render(line, buf);
+    if selected.is_none() && input.height >= 2 && line.width > 0 {
+        // The input has focus: show its block cursor after the text.
+        let x = line.x + (query.chars().count() as u16).min(line.width.saturating_sub(1));
+        buf[(x, line.y)].set_style(Style::new().add_modifier(Modifier::REVERSED));
+    }
+    buf.set_style(results, Style::new().fg(theme::TEXT).bg(theme::SURFACE));
+    app.jump_rows = visible as usize;
+    app.jump_offset = app
+        .jump_offset
+        .min(matches.len().saturating_sub(visible as usize));
+    let offset = app.jump_offset;
     for (row, path) in matches
         .iter()
         .enumerate()
@@ -769,9 +881,7 @@ fn render_file_jump(
             ..results
         };
         let style = if selected == Some(row) {
-            Style::new()
-                .bg(theme::FOCUSED_SELECTION)
-                .add_modifier(Modifier::BOLD)
+            Style::new().bg(theme::PRIMARY).add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };

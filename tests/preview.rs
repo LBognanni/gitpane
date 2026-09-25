@@ -19,7 +19,7 @@ fn file_selection_shows_repository_relative_path() {
     harness.press(KeyCode::Char('j'));
     harness.press(KeyCode::Enter);
 
-    let title = harness.line(1);
+    let title = harness.line(2);
     assert!(title.contains("nested/deeper/[bold]report.txt"), "{title}");
     assert!(harness.screen().contains("answer = 42"));
 }

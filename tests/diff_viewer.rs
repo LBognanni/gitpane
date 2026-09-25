@@ -53,7 +53,7 @@ fn scroll(harness: &Harness) -> (usize, usize) {
 /// Visible text of the diff pane.
 fn diff_text(harness: &Harness) -> String {
     let height = harness.buffer().area.height;
-    (2..height - 1)
+    (3..height - 1)
         .map(|y| harness.line(y).chars().skip(PANE_X as usize).collect())
         .collect::<Vec<String>>()
         .join("\n")
@@ -62,14 +62,14 @@ fn diff_text(harness: &Harness) -> String {
 /// Position of a change button in the diff title row.
 fn button(harness: &Harness, glyph: char) -> (u16, u16) {
     let x = harness
-        .line(1)
+        .line(2)
         .chars()
         .enumerate()
         .skip(PANE_X as usize)
         .find(|(_, c)| *c == glyph)
         .map(|(x, _)| x as u16)
         .unwrap_or_else(|| panic!("{glyph} not in the diff title:\n{}", harness.screen()));
-    (x, 1)
+    (x, 2)
 }
 
 fn enabled(harness: &Harness, glyph: char) -> bool {
@@ -99,15 +99,15 @@ fn wrap_toggle_applies_independently_to_each_viewer() {
 fn completed_text_selection_is_copied_to_clipboard() {
     let mut harness = open(80, 12, patch(&["selected text".to_string()], &[]));
     let start = PANE_X + GUTTER;
-    harness.drag((start, 2), (start + 8, 2));
+    harness.drag((start, 3), (start + 8, 3));
     assert_eq!(harness.copied, ["selected"]);
     assert_eq!(harness.app.focus, Focus::Diff);
 
     // The viewer keeps the drag when the pointer leaves it, until release.
-    harness.mouse_down((start, 2));
-    harness.drag_to((start + 4, 2));
-    harness.drag_to((5, 2));
-    harness.mouse_up((5, 2));
+    harness.mouse_down((start, 3));
+    harness.drag_to((start + 4, 3));
+    harness.drag_to((5, 3));
+    harness.mouse_up((5, 3));
     assert_eq!(harness.copied, ["selected", "     1    1 "]);
 }
 
@@ -333,7 +333,7 @@ fn diff_request_and_refresh_clear_viewer() {
     harness.send(loaded);
     assert_eq!(scroll(&harness), (0, 13));
     assert!(!diff_text(&harness).contains("Loading…"));
-    assert!(harness.line(1).contains("a.txt"));
+    assert!(harness.line(2).contains("a.txt"));
 
     harness.press(KeyCode::Char('w'));
     assert!(harness.app.diff_view.wrapped());
@@ -349,11 +349,11 @@ fn diff_request_and_refresh_clear_viewer() {
     let refreshed = harness.run_next();
     // A refresh drops the pending load without clearing the diff.
     harness.send(pending);
-    assert!(harness.line(1).contains("a.txt"));
+    assert!(harness.line(2).contains("a.txt"));
     assert_eq!(harness.app.diff_view.document().rows.len(), 80);
 
     harness.send(refreshed);
-    assert!(!harness.line(1).contains("a.txt"));
+    assert!(!harness.line(2).contains("a.txt"));
     assert!(harness.app.diff_view.document().rows.is_empty());
     assert_eq!(scroll(&harness), (0, 0));
     assert!(!diff_text(&harness).contains("Loading…"));
@@ -474,7 +474,7 @@ fn older_diff_completing_late_leaves_the_newer_diff_visible() {
     assert!(offset.1 > 0);
 
     harness.send(older);
-    assert!(harness.line(1).contains("new.py"));
+    assert!(harness.line(2).contains("new.py"));
     assert!(harness.app.diff_view.wrapped());
     assert_eq!(scroll(&harness), offset);
     assert_eq!(diff_text(&harness), visible);
@@ -537,7 +537,7 @@ fn stale_diff_failure_leaves_the_newer_diff_without_a_toast() {
     assert!(!screen.contains("Could not load diff"), "{screen}");
     assert!(!screen.contains("old diff failed"));
     assert!(harness.app.toasts.is_empty());
-    assert!(harness.line(1).contains("new.py"));
+    assert!(harness.line(2).contains("new.py"));
     assert_eq!(diff_text(&harness), visible);
 }
 
@@ -592,7 +592,7 @@ fn quiet_reload_of_an_equal_diff_leaves_the_document_untouched() {
     harness.app.diff_view.scroll_to(0, 20);
     harness.draw();
     let start = PANE_X + GUTTER;
-    harness.drag((start, 3), (start + 4, 3));
+    harness.drag((start, 4), (start + 4, 4));
     let before = harness.buffer();
 
     edit_a(&mut harness);

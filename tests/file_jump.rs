@@ -1,7 +1,7 @@
 mod common;
 
 use common::{Harness, TempDir};
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseEventKind};
 use gitpane::app::{Focus, matching_files};
 
 fn index(paths: &[&str]) -> Vec<(String, String)> {
@@ -82,7 +82,7 @@ fn quick_file_jump_is_memory_backed_and_reveals_nested_file() {
     let (_, input_row) = harness.at("Jump to file");
     assert_eq!(
         input_row, 4,
-        "the dialog border sits three rows from the top"
+        "the dialog sits three rows from the top, its text below one row of padding"
     );
     assert!(harness.line(0).contains("Changes"), "tabs stay in place");
 
@@ -91,10 +91,10 @@ fn quick_file_jump_is_memory_backed_and_reveals_nested_file() {
     type_text(&mut harness, "m");
     assert!(harness.find("summary-").is_some());
     assert!(harness.find("summer-").is_some());
-    // Exactly the two results sit under the input, then the dialog border.
-    assert!(harness.line(input_row + 1).contains("summary-"));
-    assert!(harness.line(input_row + 2).contains("summer-"));
-    assert!(harness.line(input_row + 3).contains("└"));
+    // Exactly the two results sit under the three-row input, and the dialog ends.
+    assert!(harness.line(input_row + 2).contains("summary-"));
+    assert!(harness.line(input_row + 3).contains("summer-"));
+    assert!(!harness.line(input_row + 4).contains("summ"));
     assert!(harness.find("Showing first").is_none());
 
     harness.press(KeyCode::Enter);
@@ -105,7 +105,7 @@ fn quick_file_jump_is_memory_backed_and_reveals_nested_file() {
     assert!(screen.contains(" src"), "{screen}");
     assert!(screen.contains(" reports"), "{screen}");
     assert!(screen.contains("answer = 42"), "{screen}");
-    let title = harness.line(1);
+    let title = harness.line(2);
     assert!(title.contains(&summary[..40]), "{title}");
     assert_eq!(
         files_calls(&harness),
@@ -148,9 +148,9 @@ fn clicking_a_result_jumps_to_it_and_backspace_edits_the_query() {
     type_text(&mut harness, "gamx");
     assert!(harness.find("gamx").is_some());
     harness.press(KeyCode::Backspace);
-    // The dialog's input is row 4; the first result is below it.
-    assert!(harness.line(5).contains("gamma.txt"));
-    harness.click((50, 5));
+    // The dialog's input text is row 4; the first result follows the input.
+    assert!(harness.line(6).contains("gamma.txt"));
+    harness.click((50, 6));
     assert!(!jump_open(&harness));
     assert!(harness.screen().contains("gamma body"));
 }
@@ -168,4 +168,125 @@ fn more_than_a_hundred_matches_shows_the_truncation_note() {
     harness.press(KeyCode::Char('t'));
     type_text(&mut harness, "match");
     assert!(harness.find("Showing first 100 matches").is_some());
+}
+
+#[test]
+fn highlighted_result_stays_visible_when_moving_past_the_bottom() {
+    let names: Vec<String> = (0..60).map(|i| format!("match-{i:03}.txt")).collect();
+    let paths: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut harness = Harness::launched(
+        std::path::Path::new("/repo"),
+        std::path::Path::new("/repo"),
+        &paths,
+    );
+    harness.press(KeyCode::Char('2'));
+    harness.press(KeyCode::Char('t'));
+    type_text(&mut harness, "match");
+    assert!(harness.find("match-059.txt").is_none());
+    for _ in 0..60 {
+        harness.press(KeyCode::Down);
+    }
+    assert!(
+        harness.find("match-059.txt").is_some(),
+        "{}",
+        harness.screen()
+    );
+    for _ in 0..59 {
+        harness.press(KeyCode::Up);
+    }
+    assert!(
+        harness.find("match-000.txt").is_some(),
+        "{}",
+        harness.screen()
+    );
+}
+
+#[test]
+fn the_wheel_scrolls_the_results() {
+    let names: Vec<String> = (0..60).map(|i| format!("match-{i:03}.txt")).collect();
+    let paths: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut harness = Harness::launched(
+        std::path::Path::new("/repo"),
+        std::path::Path::new("/repo"),
+        &paths,
+    );
+    harness.press(KeyCode::Char('2'));
+    harness.press(KeyCode::Char('t'));
+    type_text(&mut harness, "match");
+    let first = harness.at("match-000.txt");
+    for _ in 0..100 {
+        harness.scroll(MouseEventKind::ScrollDown, first);
+    }
+    assert!(harness.find("match-000.txt").is_none());
+    assert!(
+        harness.find("match-059.txt").is_some(),
+        "{}",
+        harness.screen()
+    );
+    harness.scroll(MouseEventKind::ScrollUp, first);
+    assert!(harness.find("match-058.txt").is_some());
+    assert!(harness.find("match-059.txt").is_none());
+}
+
+#[test]
+fn jump_dialog_is_borderless_with_a_padded_input_and_highlighted_result() {
+    let mut harness = Harness::launched(
+        std::path::Path::new("/repo"),
+        std::path::Path::new("/repo"),
+        &["alpha-one.txt", "alpha-two.txt"],
+    );
+    harness.press(KeyCode::Char('2'));
+    harness.press(KeyCode::Char('t'));
+    let (x, y) = harness.at("Jump to file");
+    // Row 3 is the input's top padding; nothing frames the dialog.
+    let top: String = harness
+        .line(3)
+        .chars()
+        .skip(x as usize - 1)
+        .take(20)
+        .collect();
+    assert_eq!(top.trim(), "");
+    let buffer = harness.buffer();
+    assert_eq!(buffer[(x - 1, y)].bg, buffer[(x - 1, 3)].bg);
+    type_text(&mut harness, "alpha");
+    harness.press(KeyCode::Down);
+    let (rx, ry) = harness.at("alpha-one.txt");
+    assert_eq!(
+        (rx, ry),
+        (x - 1, y + 2),
+        "results follow the three-row input"
+    );
+    let buffer = harness.buffer();
+    assert_ne!(buffer[(rx, ry)].bg, buffer[(rx, ry + 1)].bg, "highlighted");
+    assert!(
+        buffer[(rx, ry)]
+            .modifier
+            .contains(ratatui::style::Modifier::BOLD)
+    );
+}
+
+#[test]
+fn typing_after_scrolling_shows_the_first_match_again() {
+    let names: Vec<String> = (0..60).map(|i| format!("match-{i:03}.txt")).collect();
+    let paths: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut harness = Harness::launched(
+        std::path::Path::new("/repo"),
+        std::path::Path::new("/repo"),
+        &paths,
+    );
+    harness.press(KeyCode::Char('2'));
+    harness.press(KeyCode::Char('t'));
+    type_text(&mut harness, "match");
+    let first = harness.at("match-000.txt");
+    for _ in 0..10 {
+        harness.scroll(MouseEventKind::ScrollDown, first);
+    }
+    assert!(harness.find("match-000.txt").is_none());
+    // "match-" still matches all sixty files, more than fit.
+    type_text(&mut harness, "-");
+    assert!(
+        harness.find("match-000.txt").is_some(),
+        "{}",
+        harness.screen()
+    );
 }
