@@ -212,7 +212,6 @@ Smoke testing is owned by the user:
   | `unicode-width` | Terminal cell widths |
   | `directories` | First-launch marker location |
   | `emojis` | Gitmoji shortcode expansion |
-  | `tui-tree-widget` | Files tree, if RS-S10 adopts it (the commit tree is a small in-house two-level list) |
 
   Add nothing else without recording the reason in the story report.
 - No async runtime. Threads plus `std::sync::mpsc` channels.
@@ -1402,6 +1401,6 @@ rewrite, is among the simpler parts.
 | RS-S7 — Changes lists and actions | Done | RS-S6 | Status lists, actions, git queue |
 | RS-S8 — Diff pane | Done | RS-S7 | Highlighted diffs and change navigation |
 | RS-S9 — History | Done | RS-S8 | Commit tree and historical diffs |
-| RS-S10 — Files tab | Not started | RS-S9 | Files tree, preview, file jump |
+| RS-S10 — Files tab | Done | RS-S9 | Files tree, preview, file jump |
 | RS-S11 — Automatic refresh | Not started | RS-S10 | Watcher and quiet reconciliation |
 | RS-S12 — Cutover | Not started | RS-S11 | Python removed, docs updated, merged |
