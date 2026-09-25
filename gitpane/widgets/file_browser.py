@@ -13,6 +13,7 @@ from gitpane import git, icons
 from gitpane.preview import PreviewView, load_preview_view
 from gitpane.screens.file_jump import FileJumpScreen
 from gitpane.widgets.code_view import CodeView
+from gitpane.widgets.splitter import VerticalSplitter
 
 ErrorHandler = Callable[[str, subprocess.SubprocessError | OSError], None]
 
@@ -38,6 +39,7 @@ class FileBrowser(Horizontal):
         )
         tree.guide_depth = 3
         yield tree
+        yield VerticalSplitter()
         yield Vertical(
             Static(id="preview-title", classes="viewer-title", markup=False),
             CodeView(id="preview-view"),

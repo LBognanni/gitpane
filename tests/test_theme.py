@@ -17,7 +17,7 @@ from gitpane.app import GitPaneApp
 from gitpane.diff import Row
 from gitpane.diff_view import DiffView, render_diff_rows
 from gitpane.model import FileEntry, RepoState, Side
-from gitpane.widgets import CodeView, DiffPane, FileItem
+from gitpane.widgets import CodeView, DiffPane, FileItem, VerticalSplitter
 
 TEXT_FLOOR = 4.5
 INDICATOR_FLOOR = 3.0
@@ -371,3 +371,27 @@ def test_resizing_keeps_usable_panes_and_scrolling(
         assert view.max_scroll_y > 0
 
     _mount(tmp_path, monkeypatch, exercise, unstaged=ENTRIES)
+
+
+def test_file_viewer_sidebar_is_resizable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(app: GitPaneApp, pilot: Pilot[None]) -> None:
+        app.query_one(TabbedContent).active = "files-tab"
+        await pilot.pause()
+
+        tree = app.query_one("#files-tree")
+        pane = app.query_one("#preview-pane")
+        splitter = app.file_browser.query_one(VerticalSplitter)
+        initial = (tree.region.width, pane.region.width)
+
+        await pilot.mouse_down(splitter)
+        await pilot.hover(splitter, offset=(5, 0))
+        await pilot.mouse_up(splitter, offset=(5, 0))
+        await pilot.pause()
+
+        assert tree.region.width > initial[0]
+        assert pane.region.width < initial[1]
+        assert tree.region.width + pane.region.width == sum(initial)
+
+    _mount(tmp_path, monkeypatch, exercise)
