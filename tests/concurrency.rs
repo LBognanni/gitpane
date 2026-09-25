@@ -255,3 +255,51 @@ fn mutations_are_queued_in_request_order_and_the_last_result_wins() {
     assert!(screen.contains("[ ] M two.txt"));
     assert!(!screen.contains("Loading…"));
 }
+
+// Files half of test_superseded_refresh_results_are_never_displayed.
+#[test]
+fn superseded_files_results_are_never_displayed() {
+    let root = std::path::Path::new("/repo");
+    let mut harness = Harness::launched(root, root, &[]);
+    harness.press(KeyCode::Char('2'));
+    harness.hold_files = true;
+    harness.press(KeyCode::Char('r'));
+    harness.press(KeyCode::Char('r'));
+    *harness.git.files.lock().unwrap() = Ok(vec!["older.txt".to_string()]);
+    let older = harness.run_files();
+    *harness.git.files.lock().unwrap() = Ok(vec!["newer.txt".to_string()]);
+    let newer = harness.run_files();
+
+    harness.send(older);
+    assert!(harness.find("older.txt").is_none());
+    assert!(harness.find("Loading…").is_some());
+    harness.send(newer);
+    assert!(harness.find("newer.txt").is_some());
+    assert!(harness.find("older.txt").is_none());
+}
+
+#[test]
+fn only_the_newest_preview_applies_and_refresh_drops_pending_previews() {
+    let dir = common::TempDir::new("stale-preview");
+    std::fs::write(dir.0.join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(dir.0.join("b.txt"), "bravo\n").unwrap();
+    let mut harness = Harness::launched(&dir.0, &dir.0, &["a.txt", "b.txt"]);
+    harness.press(KeyCode::Char('2'));
+    harness.hold_files = true;
+    harness.press(KeyCode::Char('j'));
+    harness.press(KeyCode::Enter);
+    harness.press(KeyCode::Char('j'));
+    harness.press(KeyCode::Enter);
+    let alpha = harness.run_files();
+    let bravo = harness.run_files();
+    harness.send(bravo);
+    harness.send(alpha);
+    assert!(harness.screen().contains("bravo"));
+    assert!(!harness.screen().contains("alpha"));
+
+    harness.press(KeyCode::Enter);
+    let pending = harness.run_files();
+    harness.press(KeyCode::Char('r'));
+    harness.send(pending);
+    assert!(!harness.screen().contains("bravo"));
+}

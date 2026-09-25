@@ -5,8 +5,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget};
 
-use crate::app::{Action, App, Button, Focus, Modal, Severity, Tab, Target, TreeRow};
+use crate::app::{
+    Action, App, Button, Focus, MAX_FILE_JUMP_RESULTS, Modal, Severity, Tab, Target, TreeRow,
+};
 use crate::code_view::CodeView;
+use crate::icons;
 use crate::layout::{Group, Splitter};
 use crate::model::{Commit, Side};
 use crate::theme;
@@ -14,6 +17,7 @@ use crate::theme;
 const TOAST_WIDTH: u16 = 50;
 const SHORTCUTS_WIDTH: u16 = 60;
 const DISCARD_WIDTH: u16 = 60;
+const JUMP_WIDTH: u16 = 70;
 
 pub const SHORTCUTS: &str = "Mouse controls are supported throughout.
 
@@ -69,6 +73,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             Modal::Discard { entries, confirm } => {
                 let untracked = entries.iter().any(|entry| entry.status == '?');
                 render_discard(app, area, entries.len(), untracked, confirm, buf);
+            }
+            Modal::FileJump { query, selected } => {
+                render_file_jump(app, area, &query, selected, buf)
             }
         }
     }
@@ -193,12 +200,27 @@ fn render_changes(app: &mut App, area: Rect, buf: &mut Buffer) {
 fn render_files(app: &mut App, area: Rect, buf: &mut Buffer) {
     let [tree, divider, pane] = split_columns(&mut app.panes.files, area);
     splitter(app, Splitter::Files, divider, buf);
-    bordered_list(app.focus == Focus::FilesTree, Vec::new(), tree, buf);
+    let loading = app.files_tree_loading;
+    bordered_list(
+        app.focus == Focus::FilesTree,
+        loading.then(loading_line).into_iter().collect(),
+        tree,
+        buf,
+    );
     app.hits.push((tree, Target::Pane(Focus::FilesTree)));
+    if !loading {
+        file_rows(app, tree.inner(ratatui::layout::Margin::new(1, 1)), buf);
+    }
 
     let [title, view] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(pane);
     viewer_title(app, title, &app.preview_title.clone(), &[], buf);
-    render_view(&mut app.preview_view, view, buf);
+    if app.preview_loading {
+        Paragraph::new(loading_line())
+            .style(Style::new().fg(theme::TEXT).bg(theme::DIFF_BACKGROUND))
+            .render(view, buf);
+    } else {
+        render_view(&mut app.preview_view, view, buf);
+    }
     app.hits.push((view, Target::Pane(Focus::Preview)));
 }
 
@@ -424,6 +446,52 @@ fn commit_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
     app.hits.extend(hits);
 }
 
+/// Draw the visible rows of the Files tree.
+fn file_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
+    let height = area.height as usize;
+    let tree = &mut app.files;
+    let rows = tree.rows();
+    tree.offset = tree.offset.min(rows.len().saturating_sub(height));
+    if let Some(cursor) = tree
+        .cursor
+        .and_then(|node| rows.iter().position(|&r| r == node))
+    {
+        tree.offset = tree
+            .offset
+            .min(cursor)
+            .max((cursor + 1).saturating_sub(height));
+    }
+    let tree = &app.files;
+    let mut hits = Vec::new();
+    for (row, &index) in rows.iter().enumerate().skip(tree.offset).take(height) {
+        let rect = Rect {
+            y: area.y + (row - tree.offset) as u16,
+            height: 1,
+            ..area
+        };
+        let node = &tree.nodes[index];
+        let mut line = if node.dir {
+            icons::folder_label(&node.name, node.expanded)
+        } else {
+            icons::file_label(&node.name)
+        };
+        line.spans
+            .insert(0, Span::raw("   ".repeat(node.depth.saturating_sub(1))));
+        let style = if tree.cursor == Some(index) {
+            Style::new()
+                .fg(theme::TEXT)
+                .bg(theme::FOCUSED_SELECTION)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme::TEXT).bg(theme::SURFACE)
+        };
+        buf.set_style(rect, style);
+        line.style(style).render(rect, buf);
+        hits.push((rect, Target::FileRow(row)));
+    }
+    app.hits.extend(hits);
+}
+
 /// The three-cell label of an icon button.
 fn glyph(button: Button) -> &'static str {
     match button {
@@ -645,6 +713,75 @@ fn render_discard(
     .render(discard, buf);
     app.hits.push((cancel, Target::CancelDiscard));
     app.hits.push((discard, Target::ConfirmDiscard));
+}
+
+/// The file jump dialog, three rows from the top: input, results, and a truncation note.
+fn render_file_jump(
+    app: &mut App,
+    area: Rect,
+    query: &str,
+    selected: Option<usize>,
+    buf: &mut Buffer,
+) {
+    let (matches, truncated) = app.jump_matches();
+    let top = area.y + 3;
+    let available = area.bottom().saturating_sub(top);
+    // Borders, the input, and the truncation note surround the results.
+    let visible = (matches.len() as u16).min(available.saturating_sub(3 + truncated as u16));
+    let height = (visible + 3 + truncated as u16).min(available);
+    let width = JUMP_WIDTH.min(area.width);
+    let dialog = Rect::new(area.x + (area.width - width) / 2, top, width, height);
+    Clear.render(dialog, buf);
+    let block = Block::bordered()
+        .border_style(Style::new().fg(theme::BORDER))
+        .style(Style::new().fg(theme::TEXT).bg(theme::RAISED_SURFACE));
+    let inner = block.inner(dialog);
+    block.render(dialog, buf);
+    app.hits.push((dialog, Target::JumpDialog));
+    let [input, results, note] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(visible),
+        Constraint::Length(truncated as u16),
+    ])
+    .areas(inner);
+    let text = if query.is_empty() {
+        Span::styled("Jump to file", Style::new().add_modifier(Modifier::DIM))
+    } else {
+        Span::raw(query.to_string())
+    };
+    let input_style = if selected.is_none() {
+        Style::new().bg(theme::SURFACE).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().bg(theme::SURFACE)
+    };
+    buf.set_style(input, input_style);
+    text.patch_style(input_style).render(input, buf);
+    let offset = selected.map_or(0, |s| (s + 1).saturating_sub(visible as usize));
+    for (row, path) in matches
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible as usize)
+    {
+        let rect = Rect {
+            y: results.y + (row - offset) as u16,
+            height: 1,
+            ..results
+        };
+        let style = if selected == Some(row) {
+            Style::new()
+                .bg(theme::FOCUSED_SELECTION)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        buf.set_style(rect, style);
+        Span::styled(path.clone(), style).render(rect, buf);
+        app.hits.push((rect, Target::JumpResult(row)));
+    }
+    Paragraph::new(format!("Showing first {MAX_FILE_JUMP_RESULTS} matches"))
+        .style(Style::new().fg(theme::MUTED_TEXT))
+        .render(note, buf);
 }
 
 /// Word-wrap `text` to `width` columns, splitting words longer than a line.

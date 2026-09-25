@@ -50,7 +50,10 @@ fn starts_on_changes_tab_with_status_and_branch() {
         assert!(screen.contains(text), "{text:?} missing:\n{screen}");
     }
     assert_eq!(harness.line(29).trim(), "Branch: main");
-    assert_eq!(*harness.git.calls.lock().unwrap(), ["status /repo"]);
+    assert_eq!(
+        *harness.git.calls.lock().unwrap(),
+        ["status /repo", "files /repo"]
+    );
     assert_eq!(harness.app.focus, Focus::Staged);
 }
 
@@ -571,4 +574,110 @@ fn shrinking_history_never_renders_a_blank_tree() {
     with_history(&mut harness, &many[..2]);
     assert!(harness.find("Commit 0 ").is_some(), "{}", harness.screen());
     assert!(harness.find("Commit 1 ").is_some());
+}
+
+// test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views
+#[test]
+fn app_builds_file_tree_from_launch_cwd_and_refreshes_both_views() {
+    let root = std::path::Path::new("/work/repository");
+    let cwd = root.join("nested");
+    let mut harness = Harness::launched(root, &cwd, &["[red]top.txt", "[directory]/example.py"]);
+    harness.press(KeyCode::Char('2'));
+
+    let rows: Vec<String> = (2..5).map(|y| harness.line(y)).collect();
+    assert!(
+        rows[0].contains("\u{e5fe} /work/repository/nested"),
+        "{rows:?}"
+    );
+    // Folders first, each row an icon then the literal name.
+    assert!(rows[1].contains("\u{e5ff} [directory]"), "{rows:?}");
+    assert!(rows[2].contains("\u{f0219} [red]top.txt"), "{rows:?}");
+    assert!(harness.find("example.py").is_none());
+
+    harness.press(KeyCode::Char('j'));
+    harness.press(KeyCode::Enter);
+    assert!(harness.line(3).contains("\u{e5fe} [directory]"));
+    assert!(harness.line(4).contains("example.py"));
+    harness.press(KeyCode::Enter);
+    assert!(harness.line(3).contains("\u{e5ff} [directory]"));
+    assert!(harness.find("example.py").is_none());
+
+    harness.press(KeyCode::Char('r'));
+    assert_eq!(
+        harness.git.calls(),
+        [
+            "status /work/repository",
+            "files /work/repository/nested",
+            "status /work/repository",
+            "files /work/repository/nested",
+        ]
+    );
+}
+
+#[test]
+fn file_icon_takes_its_color_and_the_name_uses_the_text_color() {
+    let mut harness = Harness::launched(
+        std::path::Path::new("/repo"),
+        std::path::Path::new("/repo"),
+        &["main.py", "other.py"],
+    );
+    harness.press(KeyCode::Char('2'));
+    let buffer = harness.buffer();
+    // Row 4 is not under the cursor, so it uses plain row colors.
+    let (x, y) = harness.at("other.py");
+    let icon = &buffer[(x - 2, y)];
+    let name = &buffer[(x, y)];
+    assert_ne!(icon.fg, name.fg);
+    assert_eq!(name.fg, buffer[(x + 1, y)].fg);
+}
+
+#[test]
+fn files_tree_ignores_input_while_loading_and_refresh_clears_the_preview() {
+    let dir = TempDir::new("files-loading");
+    std::fs::write(dir.0.join("a.txt"), "alpha\n").unwrap();
+    let mut harness = Harness::launched(&dir.0, &dir.0, &["a.txt"]);
+    harness.press(KeyCode::Char('2'));
+    harness.press(KeyCode::Char('j'));
+    harness.press(KeyCode::Enter);
+    assert!(harness.screen().contains("alpha"));
+
+    harness.hold_files = true;
+    harness.press(KeyCode::Char('r'));
+    let screen = harness.screen();
+    assert!(screen.contains("Loading…"));
+    assert!(!screen.contains("alpha"), "refresh clears the preview");
+    assert!(!harness.line(1).contains("a.txt"), "and its title");
+    harness.press(KeyCode::Enter);
+    harness.press(KeyCode::Char('k'));
+    assert!(
+        harness.held_files.len() == 1,
+        "no preview starts while loading"
+    );
+
+    let files = harness.run_files();
+    harness.send(files);
+    assert!(!harness.screen().contains("Loading…"));
+    assert!(harness.find("a.txt").is_some());
+}
+
+#[test]
+fn files_failure_shows_an_error_toast() {
+    let root = std::path::Path::new("/repo");
+    let mut harness = Harness::launched(root, root, &[]);
+    *harness.git.files.lock().unwrap() = Err(failure("fatal: cannot list"));
+    harness.press(KeyCode::Char('r'));
+    assert!(harness.find("Could not refresh files").is_some());
+    assert!(harness.find("fatal: cannot list").is_some());
+}
+
+#[test]
+fn clicking_a_file_row_previews_it() {
+    let dir = TempDir::new("files-click");
+    std::fs::write(dir.0.join("b.txt"), "bravo\n").unwrap();
+    let mut harness = Harness::launched(&dir.0, &dir.0, &["b.txt"]);
+    harness.press(KeyCode::Char('2'));
+    let position = harness.at("b.txt");
+    harness.click(position);
+    assert!(harness.screen().contains("bravo"));
+    assert_eq!(harness.app.focus, Focus::FilesTree);
 }

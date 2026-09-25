@@ -14,6 +14,8 @@ use crate::layout::{Panes, Splitter};
 use crate::model::{Commit, CommitFile, DiffEntry, FileEntry, RepoState, Side};
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
+/// Most file jump results listed.
+pub const MAX_FILE_JUMP_RESULTS: usize = 100;
 /// Context rows kept above a change when scrolling to it.
 const CHANGE_CONTEXT: usize = 4;
 
@@ -109,6 +111,12 @@ pub enum Target {
     Row(Side, usize),
     /// A visible commit tree row.
     TreeRow(usize),
+    /// A visible Files tree row.
+    FileRow(usize),
+    /// The file jump dialog; swallows clicks.
+    JumpDialog,
+    /// A file jump result.
+    JumpResult(usize),
     /// The `[ ]` columns of a supported status list row.
     Checkbox(Side, usize),
     /// The dimmed area behind a modal; swallows input.
@@ -128,6 +136,29 @@ pub enum Modal {
         entries: Vec<FileEntry>,
         confirm: bool,
     },
+    /// File jump: the query, and the highlighted result when the results have focus.
+    FileJump {
+        query: String,
+        selected: Option<usize>,
+    },
+}
+
+/// The first `MAX_FILE_JUMP_RESULTS` paths containing `query` case-insensitively,
+/// and whether more exist. `files` pairs each path with its lowercase form.
+pub fn matching_files(files: &[(String, String)], query: &str) -> (Vec<String>, bool) {
+    if query.chars().count() < 3 {
+        return (Vec::new(), false);
+    }
+    let needle = query.to_lowercase();
+    let mut matches: Vec<String> = files
+        .iter()
+        .filter(|(_, lower)| lower.contains(&needle))
+        .take(MAX_FILE_JUMP_RESULTS + 1)
+        .map(|(path, _)| path.clone())
+        .collect();
+    let truncated = matches.len() > MAX_FILE_JUMP_RESULTS;
+    matches.truncate(MAX_FILE_JUMP_RESULTS);
+    (matches, truncated)
 }
 
 /// A status list: its entries, checkboxes, and highlighted row.
@@ -254,6 +285,131 @@ impl CommitTree {
     }
 }
 
+/// A Files tree node, stored in display (preorder) order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileNode {
+    /// Name shown in the tree; the root shows the launch directory.
+    pub name: String,
+    /// Path relative to the launch directory; empty for the root.
+    pub path: String,
+    pub depth: usize,
+    pub dir: bool,
+    pub expanded: bool,
+}
+
+/// The Files tree: the launch directory with nested folders and files.
+#[derive(Debug, Default)]
+pub struct FileTree {
+    pub nodes: Vec<FileNode>,
+    /// Node under the cursor.
+    pub cursor: Option<usize>,
+    /// First visible row, kept by `ui::render` so the cursor stays visible.
+    pub offset: usize,
+}
+
+impl FileTree {
+    /// Build the tree under `root_name` from `/`-separated `files`:
+    /// subdirectories first, then files, each sorted.
+    fn build(root_name: String, files: &[String]) -> Self {
+        #[derive(Default)]
+        struct Dir {
+            dirs: std::collections::BTreeMap<String, Dir>,
+            files: Vec<String>,
+        }
+        let mut top = Dir::default();
+        for file in files {
+            let mut parts: Vec<&str> = file.split('/').collect();
+            let name = parts.pop().unwrap_or_default();
+            let dir = parts.into_iter().fold(&mut top, |dir, part| {
+                dir.dirs.entry(part.to_string()).or_default()
+            });
+            dir.files.push(name.to_string());
+        }
+        fn flatten(dir: Dir, prefix: &str, depth: usize, nodes: &mut Vec<FileNode>) {
+            for (name, child) in dir.dirs {
+                let path = format!("{prefix}{name}");
+                nodes.push(FileNode {
+                    name,
+                    path: path.clone(),
+                    depth,
+                    dir: true,
+                    expanded: false,
+                });
+                flatten(child, &format!("{path}/"), depth + 1, nodes);
+            }
+            let mut files = dir.files;
+            files.sort();
+            for name in files {
+                nodes.push(FileNode {
+                    path: format!("{prefix}{name}"),
+                    name,
+                    depth,
+                    dir: false,
+                    expanded: false,
+                });
+            }
+        }
+        let mut nodes = vec![FileNode {
+            name: root_name,
+            path: String::new(),
+            depth: 0,
+            dir: true,
+            expanded: true,
+        }];
+        flatten(top, "", 1, &mut nodes);
+        Self {
+            nodes,
+            cursor: Some(0),
+            offset: 0,
+        }
+    }
+
+    /// Indices of the visible nodes: those without a collapsed ancestor.
+    pub fn rows(&self) -> Vec<usize> {
+        let mut rows = Vec::new();
+        let mut hidden_below = usize::MAX;
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.depth > hidden_below {
+                continue;
+            }
+            hidden_below = if node.dir && !node.expanded {
+                node.depth
+            } else {
+                usize::MAX
+            };
+            rows.push(index);
+        }
+        rows
+    }
+
+    fn step(&mut self, down: bool) {
+        let rows = self.rows();
+        let Some(last) = rows.len().checked_sub(1) else {
+            return;
+        };
+        let row = self
+            .cursor
+            .and_then(|node| rows.iter().position(|&r| r == node));
+        let row = match (row, down) {
+            (None, _) => 0,
+            (Some(row), true) => (row + 1).min(last),
+            (Some(row), false) => row.saturating_sub(1),
+        };
+        self.cursor = Some(rows[row]);
+    }
+
+    /// Expand every ancestor folder of node `index`.
+    fn reveal(&mut self, index: usize) {
+        let mut depth = self.nodes[index].depth;
+        for node in self.nodes[..index].iter_mut().rev() {
+            if node.depth < depth {
+                node.expanded = true;
+                depth = node.depth;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Information,
@@ -301,6 +457,16 @@ pub enum Job {
         commit: Commit,
         token: u64,
     },
+    /// List the files under `cwd`; runs on the latest-only files worker.
+    Files {
+        cwd: PathBuf,
+        token: u64,
+    },
+    /// Read a file preview; runs on the latest-only preview worker.
+    Preview {
+        path: PathBuf,
+        token: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -329,6 +495,16 @@ pub enum Event {
         token: u64,
         result: Result<Vec<CommitFile>, GitError>,
     },
+    /// Files under the launch directory for request `token`.
+    Files {
+        token: u64,
+        result: Result<Vec<String>, GitError>,
+    },
+    /// A preview document for request `token`.
+    Preview {
+        token: u64,
+        doc: Document,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -351,6 +527,8 @@ pub struct Drag {
 
 pub struct App {
     pub root: PathBuf,
+    /// The launch directory, browsed by the Files tab.
+    pub cwd: PathBuf,
     pub tab: Tab,
     pub focus: Focus,
     pub branch: String,
@@ -380,6 +558,13 @@ pub struct App {
     pub modal: Option<Modal>,
     pub toasts: Vec<Toast>,
     next_toast: u64,
+    pub files: FileTree,
+    pub files_tree_loading: bool,
+    files_token: u64,
+    /// Listed paths paired with their lowercase form, for file jump.
+    search_index: Vec<(String, String)>,
+    preview_token: u64,
+    pub preview_loading: bool,
     pub diff_title: String,
     pub preview_title: String,
     pub diff_view: CodeView,
@@ -393,9 +578,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(root: PathBuf, show_shortcuts: bool) -> Self {
+    pub fn new(root: PathBuf, cwd: PathBuf, show_shortcuts: bool) -> Self {
         Self {
             root,
+            cwd,
             tab: Tab::Changes,
             focus: Focus::Staged,
             branch: String::new(),
@@ -418,6 +604,12 @@ impl App {
             modal: show_shortcuts.then_some(Modal::Shortcuts),
             toasts: Vec::new(),
             next_toast: 0,
+            files: FileTree::default(),
+            files_tree_loading: false,
+            files_token: 0,
+            search_index: Vec::new(),
+            preview_token: 0,
+            preview_loading: false,
             diff_title: String::new(),
             preview_title: String::new(),
             diff_view: CodeView::new(),
@@ -431,9 +623,148 @@ impl App {
 
     /// Effects to run once at startup.
     pub fn start(&mut self) -> Vec<Effect> {
+        self.refresh_all()
+    }
+
+    /// Manual refresh of status, history, and files.
+    fn refresh_all(&mut self) -> Vec<Effect> {
         let mut effects = self.refresh_status();
         effects.extend(self.refresh_history());
+        effects.extend(self.refresh_files());
         effects
+    }
+
+    /// Reload the Files tree: close file jump, show loading, clear the preview.
+    fn refresh_files(&mut self) -> Vec<Effect> {
+        if matches!(self.modal, Some(Modal::FileJump { .. })) {
+            self.modal = None;
+        }
+        self.files_token += 1;
+        self.files_tree_loading = true;
+        self.clear_preview();
+        vec![Effect::Git(Job::Files {
+            cwd: self.cwd.clone(),
+            token: self.files_token,
+        })]
+    }
+
+    /// Clear the preview title and document and drop pending previews.
+    fn clear_preview(&mut self) {
+        self.preview_token += 1;
+        self.preview_loading = false;
+        self.preview_title.clear();
+        self.preview_view.set_document(Document::empty());
+    }
+
+    fn apply_files(&mut self, files: Vec<String>) {
+        self.files = FileTree::build(self.cwd.display().to_string(), &files);
+        self.search_index = files
+            .into_iter()
+            .map(|path| {
+                let lower = path.to_lowercase();
+                (path, lower)
+            })
+            .collect();
+        self.clear_preview();
+    }
+
+    /// Activate the cursor node: toggle a folder (not the root), or preview a file.
+    fn activate_file_row(&mut self) -> Vec<Effect> {
+        let Some(index) = self.files.cursor else {
+            return Vec::new();
+        };
+        let node = &mut self.files.nodes[index];
+        if node.dir {
+            if index > 0 {
+                node.expanded = !node.expanded;
+            }
+            return Vec::new();
+        }
+        let path = self.cwd.join(&node.path);
+        self.preview_title = path
+            .strip_prefix(&self.root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        self.preview_token += 1;
+        self.preview_loading = true;
+        vec![Effect::Git(Job::Preview {
+            path,
+            token: self.preview_token,
+        })]
+    }
+
+    fn files_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => self.files.step(true),
+            KeyCode::Up | KeyCode::Char('k') => self.files.step(false),
+            KeyCode::Enter => return self.activate_file_row(),
+            KeyCode::Right | KeyCode::Left => {
+                if let Some(index) = self.files.cursor.filter(|&index| index > 0) {
+                    let node = &mut self.files.nodes[index];
+                    if node.dir {
+                        node.expanded = code == KeyCode::Right;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// The current file jump matches and whether they were truncated.
+    pub fn jump_matches(&self) -> (Vec<String>, bool) {
+        match &self.modal {
+            Some(Modal::FileJump { query, .. }) => matching_files(&self.search_index, query),
+            _ => (Vec::new(), false),
+        }
+    }
+
+    /// Close file jump and reveal, select, and preview `path`, focusing the tree.
+    fn jump_to(&mut self, path: &str) -> Vec<Effect> {
+        self.modal = None;
+        let Some(index) = self
+            .files
+            .nodes
+            .iter()
+            .position(|node| !node.dir && node.path == path)
+        else {
+            return Vec::new();
+        };
+        self.files.reveal(index);
+        self.files.cursor = Some(index);
+        self.tab = Tab::Files;
+        self.focus = Focus::FilesTree;
+        self.activate_file_row()
+    }
+
+    fn jump_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        let (matches, _) = self.jump_matches();
+        let Some(Modal::FileJump { query, selected }) = &mut self.modal else {
+            return Vec::new();
+        };
+        match code {
+            KeyCode::Esc => self.modal = None,
+            KeyCode::Enter => {
+                if let Some(path) = matches.get(selected.unwrap_or(0)) {
+                    return self.jump_to(&path.clone());
+                }
+            }
+            KeyCode::Down if !matches.is_empty() => {
+                *selected = Some(selected.map_or(0, |i| (i + 1).min(matches.len() - 1)));
+            }
+            KeyCode::Up => *selected = selected.and_then(|i| i.checked_sub(1)),
+            KeyCode::Backspace => {
+                query.pop();
+                *selected = None;
+            }
+            KeyCode::Char(c) => {
+                query.push(c);
+                *selected = None;
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     /// The tree is loading history or commit files, and ignores input.
@@ -792,6 +1123,23 @@ impl App {
                     Err(error) => self.git_error("refresh history", &error),
                 }
             }
+            Event::Files { token, result } => {
+                if token != self.files_token {
+                    return Vec::new();
+                }
+                self.files_tree_loading = false;
+                match result {
+                    Ok(files) => self.apply_files(files),
+                    Err(error) => self.git_error("refresh files", &error),
+                }
+            }
+            Event::Preview { token, doc } => {
+                if token != self.preview_token {
+                    return Vec::new();
+                }
+                self.preview_loading = false;
+                self.preview_view.set_document(doc);
+            }
             Event::CommitFiles { token, result } => {
                 if token != self.commit_files_token {
                     return Vec::new();
@@ -882,6 +1230,7 @@ impl App {
                 }
                 return Vec::new();
             }
+            Some(Modal::FileJump { .. }) => return self.jump_key(key.code),
             None => {}
         }
         if let Some(side) = self.focused_side() {
@@ -929,12 +1278,31 @@ impl App {
             }
             return self.tree_key(key.code);
         }
+        if self.focus == Focus::FilesTree
+            && matches!(
+                key.code,
+                KeyCode::Down
+                    | KeyCode::Up
+                    | KeyCode::Char('j')
+                    | KeyCode::Char('k')
+                    | KeyCode::Enter
+                    | KeyCode::Right
+                    | KeyCode::Left
+            )
+        {
+            if self.files_tree_loading {
+                return Vec::new();
+            }
+            return self.files_key(key.code);
+        }
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
-            KeyCode::Char('r') => {
-                let mut effects = self.refresh_status();
-                effects.extend(self.refresh_history());
-                return effects;
+            KeyCode::Char('r') => return self.refresh_all(),
+            KeyCode::Char('t') if self.tab == Tab::Files && !self.files_tree_loading => {
+                self.modal = Some(Modal::FileJump {
+                    query: String::new(),
+                    selected: None,
+                });
             }
             KeyCode::Char('h') => self.modal = Some(Modal::Shortcuts),
             KeyCode::Char('1') => self.show_tab(Tab::Changes),
@@ -1066,6 +1434,21 @@ impl App {
                     self.commits.cursor = Some(row);
                     return self.activate_tree_row();
                 }
+                Some(Target::FileRow(_)) if self.files_tree_loading => {}
+                Some(Target::FileRow(row)) => {
+                    self.tab = Tab::Files;
+                    self.focus = Focus::FilesTree;
+                    self.files.cursor = self.files.rows().get(row).copied();
+                    return self.activate_file_row();
+                }
+                Some(Target::JumpResult(index)) => {
+                    if let Some(path) = self.jump_matches().0.get(index) {
+                        return self.jump_to(&path.clone());
+                    }
+                }
+                Some(Target::Backdrop) if matches!(self.modal, Some(Modal::FileJump { .. })) => {
+                    self.modal = None;
+                }
                 Some(Target::Checkbox(side, index)) => {
                     self.focus_list(side);
                     self.list_mut(side).toggle(index);
@@ -1082,7 +1465,7 @@ impl App {
                         sizes,
                     });
                 }
-                Some(Target::Backdrop) | None => {}
+                Some(Target::Backdrop | Target::JumpDialog) | None => {}
             },
             _ => {}
         }
