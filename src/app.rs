@@ -11,7 +11,7 @@ use crate::code_view::CodeView;
 use crate::document::Document;
 use crate::git::GitError;
 use crate::layout::{Panes, Splitter};
-use crate::model::{DiffEntry, FileEntry, RepoState, Side};
+use crate::model::{Commit, CommitFile, DiffEntry, FileEntry, RepoState, Side};
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 /// Context rows kept above a change when scrolling to it.
@@ -107,6 +107,8 @@ pub enum Target {
     Button(Button),
     /// A status list row.
     Row(Side, usize),
+    /// A visible commit tree row.
+    TreeRow(usize),
     /// The `[ ]` columns of a supported status list row.
     Checkbox(Side, usize),
     /// The dimmed area behind a modal; swallows input.
@@ -187,6 +189,71 @@ impl StatusList {
     }
 }
 
+/// A visible row of the commit tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeRow {
+    Commit(usize),
+    /// File `.1` of commit `.0`.
+    File(usize, usize),
+    /// The inert `(no changed files)` leaf of a commit.
+    Empty(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitNode {
+    pub commit: Commit,
+    pub expanded: bool,
+    /// Loaded files; `None` until the commit is first expanded.
+    pub files: Option<Vec<CommitFile>>,
+}
+
+/// The commit tree: commits with lazily loaded files, and a cursor row.
+#[derive(Debug, Default)]
+pub struct CommitTree {
+    pub nodes: Vec<CommitNode>,
+    pub cursor: Option<usize>,
+    /// First visible row, kept by `ui::render` so the cursor stays visible.
+    pub offset: usize,
+}
+
+impl CommitTree {
+    pub fn rows(&self) -> Vec<TreeRow> {
+        let mut rows = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            rows.push(TreeRow::Commit(index));
+            if let (true, Some(files)) = (node.expanded, &node.files) {
+                if files.is_empty() {
+                    rows.push(TreeRow::Empty(index));
+                }
+                rows.extend((0..files.len()).map(|file| TreeRow::File(index, file)));
+            }
+        }
+        rows
+    }
+
+    fn cursor_row(&self) -> Option<TreeRow> {
+        self.cursor.and_then(|row| self.rows().get(row).copied())
+    }
+
+    /// Hash of the commit the cursor is on, or of the parent commit of its file.
+    fn cursor_hash(&self) -> Option<String> {
+        let (TreeRow::Commit(index) | TreeRow::File(index, _) | TreeRow::Empty(index)) =
+            self.cursor_row()?;
+        Some(self.nodes[index].commit.hash.clone())
+    }
+
+    fn step(&mut self, down: bool) {
+        let Some(last) = self.rows().len().checked_sub(1) else {
+            return;
+        };
+        self.cursor = Some(match (self.cursor, down) {
+            (None, _) => 0,
+            (Some(row), true) => (row + 1).min(last),
+            (Some(row), false) => row.saturating_sub(1),
+        });
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Information,
@@ -223,6 +290,17 @@ pub enum Job {
         entry: DiffEntry,
         token: u64,
     },
+    /// Load recent commits; runs on the latest-only history worker.
+    History {
+        root: PathBuf,
+        token: u64,
+    },
+    /// Load the files of `commit`; runs on the latest-only commit-files worker.
+    CommitFiles {
+        root: PathBuf,
+        commit: Commit,
+        token: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -240,6 +318,16 @@ pub enum Event {
     Diff {
         token: u64,
         result: Result<Document, GitError>,
+    },
+    /// Recent commits for history request `token`.
+    History {
+        token: u64,
+        result: Result<Vec<Commit>, GitError>,
+    },
+    /// Files of the commit requested with `token`.
+    CommitFiles {
+        token: u64,
+        result: Result<Vec<CommitFile>, GitError>,
     },
 }
 
@@ -271,7 +359,17 @@ pub struct App {
     pub status_loading: bool,
     status_token: u64,
     /// The entry whose diff was last requested.
-    pub selection: Option<FileEntry>,
+    pub selection: Option<DiffEntry>,
+    pub commits: CommitTree,
+    pub history_loading: bool,
+    /// A commit's files are loading.
+    pub files_loading: bool,
+    history_token: u64,
+    /// The commits last applied to the tree.
+    applied_commits: Option<Vec<Commit>>,
+    commit_files_token: u64,
+    /// The commit whose files are loading.
+    files_for: usize,
     diff_token: u64,
     /// A normal diff load is pending.
     pub diff_loading: bool,
@@ -306,6 +404,13 @@ impl App {
             status_loading: true,
             status_token: 0,
             selection: None,
+            commits: CommitTree::default(),
+            history_loading: false,
+            files_loading: false,
+            history_token: 0,
+            applied_commits: None,
+            commit_files_token: 0,
+            files_for: 0,
             diff_token: 0,
             diff_loading: false,
             change_index: None,
@@ -326,7 +431,105 @@ impl App {
 
     /// Effects to run once at startup.
     pub fn start(&mut self) -> Vec<Effect> {
-        self.refresh_status()
+        let mut effects = self.refresh_status();
+        effects.extend(self.refresh_history());
+        effects
+    }
+
+    /// The tree is loading history or commit files, and ignores input.
+    pub fn tree_loading(&self) -> bool {
+        self.history_loading || self.files_loading
+    }
+
+    /// Manual history refresh: show loading on the tree, then load.
+    fn refresh_history(&mut self) -> Vec<Effect> {
+        self.history_token += 1;
+        self.history_loading = true;
+        vec![Effect::Git(Job::History {
+            root: self.root.clone(),
+            token: self.history_token,
+        })]
+    }
+
+    /// Apply loaded commits; an unchanged list keeps the tree exactly.
+    fn apply_history(&mut self, commits: Vec<Commit>) {
+        if self.applied_commits.as_ref() == Some(&commits) {
+            return;
+        }
+        let target = self.commits.cursor_hash();
+        // Drop pending commit-file loads.
+        self.commit_files_token += 1;
+        self.files_loading = false;
+        self.commits.nodes = commits
+            .iter()
+            .map(|commit| CommitNode {
+                commit: commit.clone(),
+                expanded: false,
+                files: None,
+            })
+            .collect();
+        self.commits.cursor = commits
+            .iter()
+            .position(|commit| Some(&commit.hash) == target.as_ref());
+        self.applied_commits = Some(commits);
+        if !self.commits.nodes.is_empty()
+            && self.staged.entries.is_empty()
+            && self.unstaged.entries.is_empty()
+        {
+            self.commits.cursor = Some(0);
+            if self.tab == Tab::Changes {
+                self.focus = Focus::Commits;
+            }
+        }
+    }
+
+    /// Expand or collapse commit `index`, loading its files on first expansion.
+    fn set_expanded(&mut self, index: usize, expanded: bool) -> Vec<Effect> {
+        let node = &mut self.commits.nodes[index];
+        node.expanded = expanded;
+        if !expanded || node.files.is_some() {
+            return Vec::new();
+        }
+        let commit = node.commit.clone();
+        self.commit_files_token += 1;
+        self.files_for = index;
+        self.files_loading = true;
+        vec![Effect::Git(Job::CommitFiles {
+            root: self.root.clone(),
+            commit,
+            token: self.commit_files_token,
+        })]
+    }
+
+    /// Activate the cursor row: toggle a commit, or show a file's diff.
+    fn activate_tree_row(&mut self) -> Vec<Effect> {
+        match self.commits.cursor_row() {
+            Some(TreeRow::Commit(index)) => {
+                let expanded = self.commits.nodes[index].expanded;
+                self.set_expanded(index, !expanded)
+            }
+            Some(TreeRow::File(index, file)) => {
+                let files = self.commits.nodes[index].files.as_ref();
+                let file = files.expect("loaded files")[file].clone();
+                self.request_diff(DiffEntry::Commit(file))
+            }
+            Some(TreeRow::Empty(_)) | None => Vec::new(),
+        }
+    }
+
+    fn tree_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => self.commits.step(true),
+            KeyCode::Up | KeyCode::Char('k') => self.commits.step(false),
+            KeyCode::Enter => return self.activate_tree_row(),
+            KeyCode::Right | KeyCode::Left => {
+                if let Some(TreeRow::Commit(index)) = self.commits.cursor_row() {
+                    return self.set_expanded(index, code == KeyCode::Right);
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     pub fn list(&self, side: Side) -> &StatusList {
@@ -405,21 +608,31 @@ impl App {
         Vec::new()
     }
 
-    /// Select `entry` for the diff pane and load its diff.
+    /// Select a status entry for the diff pane and load its diff.
     fn select(&mut self, entry: FileEntry) -> Vec<Effect> {
-        self.diff_title = entry.path.clone();
+        self.request_diff(DiffEntry::File(entry))
+    }
+
+    /// Show `entry` in the diff pane and load its diff.
+    fn request_diff(&mut self, entry: DiffEntry) -> Vec<Effect> {
+        let (path, reason) = match &entry {
+            DiffEntry::File(file) => (&file.path, file.unsupported_reason.as_ref()),
+            DiffEntry::Commit(file) => (&file.path, None),
+        };
+        self.diff_title = path.clone();
         self.change_index = None;
         self.diff_token += 1;
-        self.selection = Some(entry.clone());
-        if let Some(reason) = &entry.unsupported_reason {
+        if let Some(reason) = reason.cloned() {
+            self.selection = Some(entry);
             self.diff_loading = false;
-            self.apply_diff(Document::message(reason));
+            self.apply_diff(Document::message(&reason));
             return Vec::new();
         }
+        self.selection = Some(entry.clone());
         self.diff_loading = true;
         vec![Effect::Git(Job::Diff {
             root: self.root.clone(),
-            entry: DiffEntry::File(entry),
+            entry,
             token: self.diff_token,
         })]
     }
@@ -569,6 +782,26 @@ impl App {
                     Err(error) => self.git_error("load diff", &error),
                 }
             }
+            Event::History { token, result } => {
+                if token != self.history_token {
+                    return Vec::new();
+                }
+                self.history_loading = false;
+                match result {
+                    Ok(commits) => self.apply_history(commits),
+                    Err(error) => self.git_error("refresh history", &error),
+                }
+            }
+            Event::CommitFiles { token, result } => {
+                if token != self.commit_files_token {
+                    return Vec::new();
+                }
+                self.files_loading = false;
+                match result {
+                    Ok(files) => self.commits.nodes[self.files_for].files = Some(files),
+                    Err(error) => self.git_error("load commit files", &error),
+                }
+            }
         }
         Vec::new()
     }
@@ -679,9 +912,30 @@ impl App {
                 _ => {}
             }
         }
+        if self.focus == Focus::Commits
+            && matches!(
+                key.code,
+                KeyCode::Down
+                    | KeyCode::Up
+                    | KeyCode::Char('j')
+                    | KeyCode::Char('k')
+                    | KeyCode::Enter
+                    | KeyCode::Right
+                    | KeyCode::Left
+            )
+        {
+            if self.tree_loading() {
+                return Vec::new();
+            }
+            return self.tree_key(key.code);
+        }
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
-            KeyCode::Char('r') => return self.refresh_status(),
+            KeyCode::Char('r') => {
+                let mut effects = self.refresh_status();
+                effects.extend(self.refresh_history());
+                return effects;
+            }
             KeyCode::Char('h') => self.modal = Some(Modal::Shortcuts),
             KeyCode::Char('1') => self.show_tab(Tab::Changes),
             KeyCode::Char('2') => self.show_tab(Tab::Files),
@@ -804,6 +1058,13 @@ impl App {
                     if let Some(entry) = self.list(side).entries.get(index).cloned() {
                         return self.select(entry);
                     }
+                }
+                Some(Target::TreeRow(_)) if self.tree_loading() => {}
+                Some(Target::TreeRow(row)) => {
+                    self.tab = Tab::Changes;
+                    self.focus = Focus::Commits;
+                    self.commits.cursor = Some(row);
+                    return self.activate_tree_row();
                 }
                 Some(Target::Checkbox(side, index)) => {
                     self.focus_list(side);

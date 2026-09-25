@@ -5,10 +5,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget};
 
-use crate::app::{Action, App, Button, Focus, Modal, Severity, Tab, Target};
+use crate::app::{Action, App, Button, Focus, Modal, Severity, Tab, Target, TreeRow};
 use crate::code_view::CodeView;
 use crate::layout::{Group, Splitter};
-use crate::model::Side;
+use crate::model::{Commit, Side};
 use crate::theme;
 
 const TOAST_WIDTH: u16 = 50;
@@ -160,8 +160,17 @@ fn render_changes(app: &mut App, area: Rect, buf: &mut Buffer) {
     let [title, list] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(commits);
     viewer_title(app, title, "Commits", &[], buf);
-    bordered_list(app.focus == Focus::Commits, Vec::new(), list, buf);
+    let loading = app.tree_loading();
+    bordered_list(
+        app.focus == Focus::Commits,
+        loading.then(loading_line).into_iter().collect(),
+        list,
+        buf,
+    );
     app.hits.push((list, Target::Pane(Focus::Commits)));
+    if !loading {
+        commit_rows(app, list.inner(ratatui::layout::Margin::new(1, 1)), buf);
+    }
 
     let [title, view] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(pane);
     viewer_title(
@@ -320,6 +329,97 @@ fn status_rows(app: &mut App, side: Side, focused: bool, area: Rect, buf: &mut B
             hits.push((cell, Target::Button(button)));
             x += cell.width;
         }
+    }
+    app.hits.extend(hits);
+}
+
+/// A commit subject with gitmoji shortcodes expanded, then the short hash in dim text.
+pub fn format_commit_label(commit: &Commit) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!("{} ", expand_gitmoji(&commit.subject))),
+        Span::styled(
+            commit.short_hash.clone(),
+            Style::new().add_modifier(Modifier::DIM),
+        ),
+    ])
+}
+
+/// Replace known `:shortcode:`s with their emoji; unknown ones stay as written.
+fn expand_gitmoji(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(':') {
+        let after = &rest[start + 1..];
+        let found = after
+            .find(':')
+            .and_then(|end| Some((end, emojis::get_by_shortcode(&after[..end])?)));
+        match found {
+            Some((end, emoji)) => {
+                out.push_str(&rest[..start]);
+                out.push_str(emoji.as_str());
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=start]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Draw the visible rows of the commit tree.
+fn commit_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
+    let height = area.height as usize;
+    let tree = &mut app.commits;
+    let count = tree.rows().len();
+    tree.offset = tree.offset.min(count.saturating_sub(height));
+    if let Some(cursor) = tree.cursor {
+        tree.offset = tree
+            .offset
+            .min(cursor)
+            .max((cursor + 1).saturating_sub(height));
+    }
+    let tree = &app.commits;
+    let mut hits = Vec::new();
+    for (index, row) in tree
+        .rows()
+        .into_iter()
+        .enumerate()
+        .skip(tree.offset)
+        .take(height)
+    {
+        let rect = Rect {
+            y: area.y + (index - tree.offset) as u16,
+            height: 1,
+            ..area
+        };
+        let line = match row {
+            TreeRow::Commit(commit) => {
+                let node = &tree.nodes[commit];
+                let mut line = format_commit_label(&node.commit);
+                let marker = if node.expanded { "▾ " } else { "▸ " };
+                line.spans.insert(0, Span::raw(marker));
+                line
+            }
+            TreeRow::File(commit, file) => {
+                let file = &tree.nodes[commit].files.as_ref().expect("loaded files")[file];
+                Line::from(format!("    {} {}", file.status, file.path))
+            }
+            TreeRow::Empty(_) => Line::from("    (no changed files)"),
+        };
+        let style = if tree.cursor == Some(index) {
+            Style::new()
+                .fg(theme::TEXT)
+                .bg(theme::FOCUSED_SELECTION)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme::TEXT).bg(theme::SURFACE)
+        };
+        buf.set_style(rect, style);
+        line.style(style).render(rect, buf);
+        hits.push((rect, Target::TreeRow(index)));
     }
     app.hits.extend(hits);
 }

@@ -6,7 +6,9 @@ use common::{Harness, TempDir, state};
 use crossterm::event::{KeyCode, KeyModifiers};
 use gitpane::app::{Event, Focus, Severity, Tab};
 use gitpane::git::GitError;
+use gitpane::model::{Commit, CommitFile};
 use gitpane::runtime::{claim_first_launch, default_marker};
+use gitpane::ui::format_commit_label;
 use ratatui::style::Modifier;
 
 /// The label of the bold tab in the tabs row.
@@ -309,4 +311,264 @@ fn clicking_a_toast_dismisses_that_toast_only() {
     harness.click(b);
     assert!(harness.find("toast B").is_none());
     assert!(harness.find("toast C").is_some());
+}
+
+fn commit(hash: &str, subject: &str) -> Commit {
+    Commit {
+        hash: hash.to_string(),
+        short_hash: hash[..7].to_string(),
+        parent: Some("parent-hash".to_string()),
+        subject: subject.to_string(),
+    }
+}
+
+fn commit_file(commit: &Commit, path: &str) -> CommitFile {
+    CommitFile {
+        path: path.to_string(),
+        status: 'M',
+        commit_hash: commit.hash.clone(),
+        parent: commit.parent.clone(),
+    }
+}
+
+/// Serve `commits` as history and reload it with `r`.
+fn with_history(harness: &mut Harness, commits: &[Commit]) {
+    *harness.git.commits.lock().unwrap() = Ok(commits.to_vec());
+    harness.press(KeyCode::Char('r'));
+}
+
+#[test]
+fn format_commit_label_expands_gitmoji_and_places_hash_last() {
+    for (subject, expected) in [
+        (":bug: Fix crash", "\u{1f41b} Fix crash abc1234"),
+        ("Plain subject", "Plain subject abc1234"),
+        (
+            ":not_a_gitmoji: Keep unknown",
+            ":not_a_gitmoji: Keep unknown abc1234",
+        ),
+    ] {
+        let label = format_commit_label(&commit("abc1234full", subject));
+        assert_eq!(label.to_string(), expected);
+        let dim: Vec<&str> = label
+            .spans
+            .iter()
+            .filter(|span| span.style.add_modifier.contains(Modifier::DIM))
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(dim, ["abc1234"], "{subject}");
+    }
+}
+
+#[test]
+fn commit_selection_expands_files_and_file_selection_uses_shared_diff() {
+    let mut status = state(&["working.txt"], &[]);
+    status.branch = "[bold]feature".to_string();
+    let mut harness = Harness::new(Ok(status));
+    let added = commit("abc1234full", "Add history");
+    harness.git.commit_files.lock().unwrap().insert(
+        added.hash.clone(),
+        vec![commit_file(&added, "[bold]report.txt")],
+    );
+    harness.git.set_diff(
+        "[bold]report.txt",
+        Ok(
+            "diff --git a/report.txt b/report.txt\n--- a/report.txt\n+++ b/report.txt\n\
+            @@ -1,2 +1,2 @@\n context line\n-old report text\n+new report text\n"
+                .to_string(),
+        ),
+    );
+    with_history(&mut harness, std::slice::from_ref(&added));
+    assert!(harness.find("▸ Add history abc1234").is_some());
+    assert_eq!(harness.line(29).trim(), "Branch: [bold]feature");
+
+    // Clicking a commit expands it and loads its files lazily.
+    harness.click(harness.at("Add history"));
+    assert_eq!(harness.app.focus, Focus::Commits);
+    assert!(harness.find("▾ Add history").is_some());
+    assert!(harness.find("M [bold]report.txt").is_some());
+    let loads = |harness: &Harness| {
+        harness
+            .git
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("commit_files"))
+            .count()
+    };
+    assert_eq!(loads(&harness), 1);
+
+    // Clicking toggles; loaded files are kept.
+    harness.click(harness.at("Add history"));
+    assert!(harness.find("M [bold]report.txt").is_none());
+    harness.click(harness.at("Add history"));
+    assert!(harness.find("M [bold]report.txt").is_some());
+    assert_eq!(loads(&harness), 1);
+
+    // Selecting the file shows its historical diff in the shared pane.
+    harness.click(harness.at("M [bold]report.txt"));
+    let screen = harness.screen();
+    assert!(screen.contains("│ [bold]report.txt"), "{screen}");
+    assert!(screen.contains("new report text"));
+    assert!(screen.contains("old report text"));
+    assert!(
+        harness
+            .git
+            .calls()
+            .contains(&"diff [bold]report.txt".to_string())
+    );
+}
+
+#[test]
+fn commit_tree_keys_move_expand_collapse_and_select() {
+    let mut harness = Harness::new(Ok(state(&[], &[])));
+    let first = commit("aaaaaaafull", "First");
+    let second = commit("bbbbbbbfull", "Second");
+    harness
+        .git
+        .commit_files
+        .lock()
+        .unwrap()
+        .insert(second.hash.clone(), vec![commit_file(&second, "b.txt")]);
+    harness.git.set_diff(
+        "b.txt",
+        Ok("--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-was\n+now\n".to_string()),
+    );
+    with_history(&mut harness, &[first, second]);
+    assert_eq!(harness.app.focus, Focus::Commits);
+
+    harness.press(KeyCode::Char('j'));
+    harness.press(KeyCode::Right);
+    assert!(harness.find("▾ Second").is_some());
+    harness.press(KeyCode::Left);
+    assert!(harness.find("▸ Second").is_some());
+    assert!(harness.find("M b.txt").is_none());
+    harness.press(KeyCode::Enter);
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Enter);
+    let screen = harness.screen();
+    assert!(screen.contains("now"), "{screen}");
+    assert!(screen.contains("was"));
+    harness.press(KeyCode::Char('k'));
+    harness.press(KeyCode::Enter);
+    assert!(harness.find("M b.txt").is_none());
+}
+
+#[test]
+fn commit_without_files_shows_an_inert_leaf() {
+    let mut harness = Harness::new(Ok(state(&[], &[])));
+    with_history(&mut harness, &[commit("aaaaaaafull", "Empty")]);
+    harness.press(KeyCode::Enter);
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Enter);
+    assert!(harness.find("(no changed files)").is_some());
+    assert!(
+        !harness
+            .git
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("diff"))
+    );
+}
+
+#[test]
+fn history_selects_the_first_commit_only_when_both_lists_are_empty() {
+    let mut harness = Harness::new(Ok(state(&[], &["notes.txt"])));
+    with_history(&mut harness, &[commit("aaaaaaafull", "First")]);
+    assert_eq!(harness.app.focus, Focus::Unstaged);
+    let (x, y) = harness.at("First");
+    assert!(!harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+
+    *harness.git.status.lock().unwrap() = Ok(state(&[], &[]));
+    with_history(&mut harness, &[commit("bbbbbbbfull", "Second")]);
+    assert_eq!(harness.app.focus, Focus::Commits);
+    let (x, y) = harness.at("Second");
+    assert!(harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn unchanged_history_keeps_the_tree_and_changed_history_keeps_the_cursor_commit() {
+    let mut harness = Harness::new(Ok(state(&["working.txt"], &[])));
+    let first = commit("aaaaaaafull", "First");
+    let second = commit("bbbbbbbfull", "Second");
+    harness
+        .git
+        .commit_files
+        .lock()
+        .unwrap()
+        .insert(second.hash.clone(), vec![commit_file(&second, "b.txt")]);
+    with_history(&mut harness, &[first.clone(), second.clone()]);
+    harness.click(harness.at("Second"));
+    harness.press(KeyCode::Down);
+
+    // Same commits: expansion, files, and cursor stay.
+    harness.press(KeyCode::Char('r'));
+    assert!(harness.find("M b.txt").is_some());
+    let (x, y) = harness.at("M b.txt");
+    assert!(harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+
+    // New commits: rebuilt collapsed, cursor on the file's commit.
+    with_history(&mut harness, &[commit("ccccccc0", "Newest"), first, second]);
+    assert!(harness.find("M b.txt").is_none());
+    let (x, y) = harness.at("▸ Second");
+    assert!(harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn history_failure_shows_an_error_toast() {
+    let mut harness = Harness::new(Ok(state(&[], &[])));
+    *harness.git.commits.lock().unwrap() = Err(failure("fatal: bad history"));
+    harness.press(KeyCode::Char('r'));
+    let screen = harness.screen();
+    assert!(screen.contains("Could not refresh history"), "{screen}");
+    assert!(screen.contains("fatal: bad history"));
+}
+
+#[test]
+fn tree_ignores_keys_while_commit_files_load() {
+    let mut harness = Harness::new(Ok(state(&[], &[])));
+    let first = commit("aaaaaaafull", "First");
+    let second = commit("bbbbbbbfull", "Second");
+    harness
+        .git
+        .commit_files
+        .lock()
+        .unwrap()
+        .insert(first.hash.clone(), vec![commit_file(&first, "a.txt")]);
+    with_history(&mut harness, &[first, second]);
+    harness.hold_history = true;
+    harness.press(KeyCode::Right);
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Right);
+    assert_eq!(harness.held_history.len(), 1);
+
+    let files = harness.run_history();
+    harness.send(files);
+    assert!(harness.find("M a.txt").is_some());
+    let loads = harness
+        .git
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("commit_files"))
+        .count();
+    assert_eq!(loads, 1);
+}
+
+#[test]
+fn shrinking_history_never_renders_a_blank_tree() {
+    let mut harness = Harness::new(Ok(state(&["working.txt"], &[])));
+    let many: Vec<Commit> = (0..40)
+        .map(|i| commit(&format!("{i:07}full"), &format!("Commit {i}")))
+        .collect();
+    with_history(&mut harness, &many);
+    harness.press(KeyCode::Tab);
+    harness.press(KeyCode::Tab);
+    assert_eq!(harness.app.focus, Focus::Commits);
+    for _ in 0..40 {
+        harness.press(KeyCode::Down);
+    }
+    assert!(harness.find("Commit 39").is_some());
+
+    // The cursor commit disappears, so the rebuilt tree has no cursor.
+    with_history(&mut harness, &many[..2]);
+    assert!(harness.find("Commit 0 ").is_some(), "{}", harness.screen());
+    assert!(harness.find("Commit 1 ").is_some());
 }

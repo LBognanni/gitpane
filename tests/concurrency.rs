@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use common::{FakeGit, Harness, ROOT, state};
 use crossterm::event::KeyCode;
 use gitpane::app::{Action, Event, Job};
-use gitpane::model::{FileEntry, Side};
+use gitpane::model::{Commit, FileEntry, Side};
 use gitpane::runtime;
 
 fn status_job(token: u64) -> Job {
@@ -123,6 +123,38 @@ fn superseded_refresh_results_are_never_displayed() {
     assert_eq!(harness.line(29).trim(), "Branch: newer");
     assert!(screen.contains("[ ] M new.txt"));
     assert!(!screen.contains("old.txt"));
+}
+
+fn commit(hash: &str, subject: &str) -> Commit {
+    Commit {
+        hash: hash.to_string(),
+        short_hash: hash[..7].to_string(),
+        parent: None,
+        subject: subject.to_string(),
+    }
+}
+
+#[test]
+fn superseded_history_results_are_never_displayed() {
+    let mut harness = Harness::held(Ok(state(&[], &[])));
+    harness.hold_history = true;
+    harness.press(KeyCode::Char('r'));
+    harness.press(KeyCode::Char('r'));
+    *harness.git.commits.lock().unwrap() = Ok(vec![commit("aaaaaaafull", "Older commit")]);
+    let older = harness.run_history();
+    *harness.git.commits.lock().unwrap() = Ok(vec![commit("bbbbbbbfull", "Newer commit")]);
+    let newer = harness.run_history();
+
+    harness.send(older);
+    let screen = harness.screen();
+    assert!(!screen.contains("Older commit"), "{screen}");
+    assert_eq!(screen.matches("Loading…").count(), 3);
+
+    harness.send(newer);
+    let screen = harness.screen();
+    assert!(screen.contains("Newer commit"), "{screen}");
+    assert!(!screen.contains("Older commit"));
+    assert_eq!(screen.matches("Loading…").count(), 2);
 }
 
 #[test]
