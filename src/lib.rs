@@ -10,3 +10,4 @@ pub mod model;
 pub mod runtime;
 pub mod theme;
 pub mod ui;
+pub mod watcher;
