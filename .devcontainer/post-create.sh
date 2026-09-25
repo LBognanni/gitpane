@@ -19,6 +19,9 @@ fi
 
 git config --global --add safe.directory '*'
 
+# Docker creates a new cargo registry volume owned by root.
+sudo chown vscode:rustlang /usr/local/cargo/registry
+
 # Keep Claude Code's state across rebuilds in the mounted ~/.claude directory.
 # A single-file bind mount breaks on atomic rewrites, so symlink instead.
 ln -sfn ~/.claude/devcontainer.claude.json ~/.claude.json
