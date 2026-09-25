@@ -301,7 +301,7 @@ fn status_rows(app: &mut App, side: Side, focused: bool, area: Rect, buf: &mut B
     let offset = list.offset;
     let mut hits = Vec::new();
     if let Some(bar) = vbar {
-        render_scrollbar(buf, bar, true, count, height, offset);
+        render_scrollbar(buf, bar, true, count, height, offset, None);
         let focus = match side {
             Side::Staged => Focus::Staged,
             Side::Unstaged => Focus::Unstaged,
@@ -589,11 +589,19 @@ fn tree_rows(
         hits.push((rect, Ok(index)));
     }
     if let Some(bar) = vbar {
-        render_scrollbar(buf, bar, true, count, height, *offset);
+        render_scrollbar(buf, bar, true, count, height, *offset, None);
         hits.push((bar, Err(Scrollbar::new(bar, true, count, height))));
     }
     if let Some(bar) = hbar {
-        render_scrollbar(buf, bar, false, width, window_x, *scroll_x);
+        render_scrollbar(
+            buf,
+            bar,
+            false,
+            width,
+            window_x,
+            *scroll_x,
+            Some(theme::SURFACE),
+        );
         hits.push((bar, Err(Scrollbar::new(bar, false, width, window_x))));
     }
     if let (Some(v), Some(h)) = (vbar, hbar) {

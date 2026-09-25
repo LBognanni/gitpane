@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use unicode_width::UnicodeWidthChar;
 
 use crate::document::Document;
@@ -158,6 +158,7 @@ pub fn render_scrollbar(
     size: usize,
     window: usize,
     scroll: usize,
+    half_on: Option<Color>,
 ) {
     let track = if vertical { bar.height } else { bar.width } as usize;
     let (start, len) = thumb(track, size, window, scroll);
@@ -169,7 +170,17 @@ pub fn render_scrollbar(
             theme::SCROLLBAR_BACKGROUND
         };
         buf[(x, y)].reset();
-        buf[(x, y)].set_style(Style::new().bg(color));
+        match half_on {
+            // A thinner bar: the upper half block over the pane surface.
+            Some(pane) => {
+                buf[(x, y)]
+                    .set_symbol("▀")
+                    .set_style(Style::new().fg(color).bg(pane));
+            }
+            None => {
+                buf[(x, y)].set_style(Style::new().bg(color));
+            }
+        }
     }
 }
 
@@ -820,7 +831,7 @@ impl CodeView {
     fn render_bar(&self, buf: &mut Buffer, bar: Rect, vertical: bool) {
         if let Some(b) = self.bar(vertical) {
             let scroll = self.axis_scroll(vertical);
-            render_scrollbar(buf, bar, vertical, b.size, b.window, scroll);
+            render_scrollbar(buf, bar, vertical, b.size, b.window, scroll, None);
         }
     }
 }
