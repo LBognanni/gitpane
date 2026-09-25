@@ -9,7 +9,7 @@ use crate::app::{
     Action, App, Button, FileNode, Focus, MAX_FILE_JUMP_RESULTS, Modal, Severity, Tab, Target,
     TreeRow,
 };
-use crate::code_view::{CodeView, render_scrollbar, scrollbar_layout};
+use crate::code_view::{CodeView, Scrollbar, render_scrollbar, scrollbar_layout};
 use crate::icons;
 use crate::layout::{Group, Splitter};
 use crate::model::{Commit, Side};
@@ -299,12 +299,18 @@ fn status_rows(app: &mut App, side: Side, focused: bool, area: Rect, buf: &mut B
         height,
     );
     let offset = list.offset;
+    let mut hits = Vec::new();
     if let Some(bar) = vbar {
         render_scrollbar(buf, bar, true, count, height, offset);
+        let focus = match side {
+            Side::Staged => Focus::Staged,
+            Side::Unstaged => Focus::Unstaged,
+        };
+        let scrollbar = Scrollbar::new(bar, true, count, height);
+        hits.push((bar, Target::Scrollbar(focus, scrollbar)));
     }
     let hover = app.hover;
     let list = app.list(side);
-    let mut hits = Vec::new();
     for (index, entry) in list.entries.iter().enumerate().skip(offset).take(height) {
         let rect = Rect {
             y: area.y + (index - offset) as u16,
@@ -447,10 +453,11 @@ fn commit_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
         area,
         buf,
     );
-    app.hits.extend(
-        hits.into_iter()
-            .map(|(rect, row)| (rect, Target::TreeRow(row))),
-    );
+    app.hits
+        .extend(hits.into_iter().map(|(rect, row)| match row {
+            Ok(row) => (rect, Target::TreeRow(row)),
+            Err(bar) => (rect, Target::Scrollbar(Focus::Commits, bar)),
+        }));
 }
 
 /// Draw the visible rows of the Files tree.
@@ -492,10 +499,11 @@ fn file_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
         area,
         buf,
     );
-    app.hits.extend(
-        hits.into_iter()
-            .map(|(rect, row)| (rect, Target::FileRow(row))),
-    );
+    app.hits
+        .extend(hits.into_iter().map(|(rect, row)| match row {
+            Ok(row) => (rect, Target::FileRow(row)),
+            Err(bar) => (rect, Target::Scrollbar(Focus::FilesTree, bar)),
+        }));
 }
 
 /// Scroll `offset` so a `cursor` that moved since the last draw is visible,
@@ -520,7 +528,7 @@ fn follow(
 
 /// Draw a tree's `lines` scrolled to (`scroll_x`, `offset`) with scrollbars as
 /// needed, highlighting row `cursor` (bold only while `focused`); returns each
-/// drawn row's rect and index.
+/// drawn row's rect and index, then each scrollbar's rect and geometry.
 #[allow(clippy::too_many_arguments)]
 fn tree_rows(
     lines: Vec<Line<'static>>,
@@ -531,7 +539,7 @@ fn tree_rows(
     followed: &mut Option<usize>,
     area: Rect,
     buf: &mut Buffer,
-) -> Vec<(Rect, usize)> {
+) -> Vec<(Rect, Result<usize, Scrollbar>)> {
     let count = lines.len();
     let width = lines.iter().map(Line::width).max().unwrap_or(0);
     let (area, vbar, hbar) = scrollbar_layout(area, count, width);
@@ -578,13 +586,15 @@ fn tree_rows(
             }
             buf[(rect.x + dx, rect.y)] = cell;
         }
-        hits.push((rect, index));
+        hits.push((rect, Ok(index)));
     }
     if let Some(bar) = vbar {
         render_scrollbar(buf, bar, true, count, height, *offset);
+        hits.push((bar, Err(Scrollbar::new(bar, true, count, height))));
     }
     if let Some(bar) = hbar {
         render_scrollbar(buf, bar, false, width, window_x, *scroll_x);
+        hits.push((bar, Err(Scrollbar::new(bar, false, width, window_x))));
     }
     if let (Some(v), Some(h)) = (vbar, hbar) {
         buf[(v.x, h.y)].reset();

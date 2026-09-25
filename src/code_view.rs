@@ -51,6 +51,74 @@ fn thumb(track: usize, virtual_size: usize, window: usize, scroll: usize) -> (us
     (start, len)
 }
 
+/// A drawn scrollbar's geometry: `window` of `size` on a `track` starting at
+/// screen coordinate `origin` along the bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scrollbar {
+    pub vertical: bool,
+    pub origin: u16,
+    pub track: usize,
+    pub size: usize,
+    pub window: usize,
+}
+
+/// The outcome of pressing a scrollbar.
+pub enum Press {
+    /// The thumb was grabbed this many cells below its start.
+    Grab(usize),
+    /// The track was clicked: scroll to this position.
+    Jump(usize),
+}
+
+impl Scrollbar {
+    pub fn new(bar: Rect, vertical: bool, size: usize, window: usize) -> Self {
+        let (origin, track) = if vertical {
+            (bar.y, bar.height)
+        } else {
+            (bar.x, bar.width)
+        };
+        Self {
+            vertical,
+            origin,
+            track: track as usize,
+            size,
+            window,
+        }
+    }
+
+    fn along(&self, pos: Position) -> usize {
+        let at = if self.vertical { pos.y } else { pos.x };
+        at.saturating_sub(self.origin) as usize
+    }
+
+    /// Press at `pos` while scrolled to `scroll`.
+    pub fn press(&self, pos: Position, scroll: usize) -> Press {
+        let along = self.along(pos);
+        let (start, len) = thumb(self.track, self.size, self.window, scroll);
+        if (start..start + len).contains(&along) {
+            Press::Grab(along - start)
+        } else {
+            Press::Jump(scrollbar_click_target(
+                along,
+                self.track,
+                self.size,
+                self.window,
+            ))
+        }
+    }
+
+    /// The scroll position for a thumb grabbed at `grab` dragged to `pos`.
+    pub fn drag(&self, pos: Position, grab: usize) -> usize {
+        let (_, len) = thumb(self.track, self.size, self.window, 0);
+        let start = self.along(pos).saturating_sub(grab);
+        let max = self.size.saturating_sub(self.window);
+        (start * max)
+            .checked_div(self.track.saturating_sub(len))
+            .unwrap_or(0)
+            .min(max)
+    }
+}
+
 /// Whether `rows` rows up to `width` cells wide need (vertical, horizontal)
 /// scrollbars in a `w` x `h` area, counting the space each bar takes; the
 /// vertical bar is `bar` columns wide.
@@ -515,10 +583,24 @@ impl CodeView {
             MouseEventKind::ScrollRight => self.scroll_to(x + WHEEL, y),
             MouseEventKind::ScrollLeft => self.scroll_to(x.saturating_sub(WHEEL), y),
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(bar) = self.vbar.filter(|b| b.contains(pos)) {
-                    self.press_bar(true, (pos.y - bar.y) as usize);
-                } else if let Some(bar) = self.hbar.filter(|b| b.contains(pos)) {
-                    self.press_bar(false, (pos.x - bar.x) as usize);
+                let on_bar = |rect: Option<Rect>| rect.is_some_and(|r| r.contains(pos));
+                let hit = if on_bar(self.vbar) {
+                    self.bar(true)
+                } else if on_bar(self.hbar) {
+                    self.bar(false)
+                } else {
+                    None
+                };
+                if let Some(bar) = hit {
+                    match bar.press(pos, self.axis_scroll(bar.vertical)) {
+                        Press::Grab(grab) => {
+                            self.drag = Drag::Thumb {
+                                vertical: bar.vertical,
+                                grab,
+                            }
+                        }
+                        Press::Jump(value) => self.set_axis(bar.vertical, value),
+                    }
                 } else if self.content.contains(pos) {
                     self.selection = None;
                     self.drag = Drag::Select(self.point_at(pos));
@@ -526,13 +608,8 @@ impl CodeView {
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.drag {
                 Drag::Thumb { vertical, grab } => {
-                    let (bar, along) = if vertical {
-                        (self.vbar, event.row.saturating_sub(self.area.y))
-                    } else {
-                        (self.hbar, event.column.saturating_sub(self.area.x))
-                    };
-                    if bar.is_some() {
-                        self.drag_thumb(vertical, (along as usize).saturating_sub(grab));
+                    if let Some(bar) = self.bar(vertical) {
+                        self.set_axis(vertical, bar.drag(pos, grab));
                     }
                 }
                 Drag::Select(anchor) => {
@@ -553,15 +630,23 @@ impl CodeView {
         None
     }
 
-    /// (track length, virtual size, window, scroll) for one axis.
-    fn axis(&self, vertical: bool) -> (usize, usize, usize, usize) {
+    /// The drawn scrollbar for one axis, if any.
+    fn bar(&self, vertical: bool) -> Option<Scrollbar> {
         let (w, h) = self.virtual_size();
         if vertical {
-            let window = self.content.height as usize;
-            (window, h, window, self.scroll_y)
+            let bar = self.vbar?;
+            Some(Scrollbar::new(bar, true, h, self.content.height as usize))
         } else {
-            let window = self.content.width as usize;
-            (window, w, window, self.scroll_x)
+            let bar = self.hbar?;
+            Some(Scrollbar::new(bar, false, w, self.content.width as usize))
+        }
+    }
+
+    fn axis_scroll(&self, vertical: bool) -> usize {
+        if vertical {
+            self.scroll_y
+        } else {
+            self.scroll_x
         }
     }
 
@@ -571,29 +656,6 @@ impl CodeView {
         } else {
             self.scroll_to(value, self.scroll_y);
         }
-    }
-
-    fn press_bar(&mut self, vertical: bool, along: usize) {
-        let (track, size, window, scroll) = self.axis(vertical);
-        let (start, len) = thumb(track, size, window, scroll);
-        if (start..start + len).contains(&along) {
-            self.drag = Drag::Thumb {
-                vertical,
-                grab: along - start,
-            };
-        } else {
-            self.set_axis(vertical, scrollbar_click_target(along, track, size, window));
-        }
-    }
-
-    fn drag_thumb(&mut self, vertical: bool, start: usize) {
-        let (track, size, window, scroll) = self.axis(vertical);
-        let (_, len) = thumb(track, size, window, scroll);
-        let max = size.saturating_sub(window);
-        let value = (start * max)
-            .checked_div(track.saturating_sub(len))
-            .unwrap_or(0);
-        self.set_axis(vertical, value);
     }
 
     /// Map a screen position to a selection point; past the end maps beyond the last row.
@@ -756,8 +818,10 @@ impl CodeView {
     }
 
     fn render_bar(&self, buf: &mut Buffer, bar: Rect, vertical: bool) {
-        let (_, size, window, scroll) = self.axis(vertical);
-        render_scrollbar(buf, bar, vertical, size, window, scroll);
+        if let Some(b) = self.bar(vertical) {
+            let scroll = self.axis_scroll(vertical);
+            render_scrollbar(buf, bar, vertical, b.size, b.window, scroll);
+        }
     }
 }
 

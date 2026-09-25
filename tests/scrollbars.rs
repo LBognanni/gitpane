@@ -177,3 +177,118 @@ fn wide_glyphs_cut_by_the_tree_edge_never_cover_the_border() {
         );
     }
 }
+
+/// A harness with 40 unstaged files, and the (column, first row, last row)
+/// of the Unstaged list's vertical scrollbar.
+fn long_unstaged() -> (Harness, (u16, u16, u16)) {
+    let files: Vec<String> = (0..40).map(|i| format!("file{i:02}.txt")).collect();
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    let harness = Harness::new(Ok(state(&[], &files)));
+    let (_, top) = harness.at("file00.txt");
+    let x = bar_column(&harness, top);
+    let bottom = (top..).find(|&y| harness.line(y).starts_with('└')).unwrap() - 1;
+    (harness, (x, top, bottom))
+}
+
+/// The Files tree's (vertical bar column, first row, last row).
+fn tree_bar(harness: &Harness) -> (u16, u16, u16) {
+    let (_, top) = harness.at("/");
+    let x = bar_column(harness, top);
+    let bottom = (top..).find(|&y| harness.line(y).starts_with('└')).unwrap() - 1;
+    (x, top, bottom)
+}
+
+/// The scroll position for a thumb dragged `moved` cells on a `track` showing
+/// `window` of `size`, like the viewers' scrollbars.
+fn dragged(moved: usize, track: usize, size: usize, window: usize) -> usize {
+    let len = (track * window / size).max(1);
+    moved * (size - window) / (track - len)
+}
+
+#[test]
+fn clicking_a_list_track_jumps_without_selecting_a_row() {
+    let (mut harness, (x, _, bottom)) = long_unstaged();
+    let highlight = harness.app.unstaged.highlight;
+    harness.click((x, bottom));
+    harness.mouse_up((x, bottom));
+    assert!(harness.find("file39.txt").is_some(), "{}", harness.screen());
+    assert!(harness.find("file00.txt").is_none());
+    assert_eq!(harness.app.unstaged.highlight, highlight);
+    assert!(!harness.git.calls().iter().any(|c| c.starts_with("diff")));
+}
+
+#[test]
+fn clicking_a_tree_track_jumps_without_moving_the_cursor() {
+    let mut harness = files_tab("/repo", 40);
+    let (x, _, bottom) = tree_bar(&harness);
+    let cursor = harness.app.files.cursor;
+    harness.click((x, bottom));
+    harness.mouse_up((x, bottom));
+    assert!(harness.find("file39.txt").is_some(), "{}", harness.screen());
+    assert!(harness.find("/repo").is_none());
+    assert_eq!(harness.app.files.cursor, cursor);
+}
+
+#[test]
+fn dragging_a_list_thumb_scrolls_proportionally() {
+    let (mut harness, (x, top, bottom)) = long_unstaged();
+    let track = (bottom - top + 1) as usize;
+    harness.mouse_down((x, top));
+    harness.drag_to((x, top + 3));
+    let first = dragged(3, track, 40, track);
+    assert!(first > 0);
+    assert!(
+        harness.line(top).contains(&format!("file{first:02}.txt")),
+        "{}",
+        harness.screen()
+    );
+    harness.mouse_up((x, top + 3));
+}
+
+#[test]
+fn dragging_a_tree_thumb_scrolls_both_axes_proportionally() {
+    let mut harness = files_tab("/repo", 40);
+    let (x, top, bottom) = tree_bar(&harness);
+    let track = (bottom - top + 1) as usize;
+    harness.mouse_down((x, top));
+    harness.drag_to((x, top + 3));
+    harness.mouse_up((x, top + 3));
+    // The root row comes first, so row `n` shows file `n - 1`.
+    let file = dragged(3, track, 41, track) - 1;
+    assert!(
+        harness.line(top).contains(&format!("file{file:02}.txt")),
+        "{}",
+        harness.screen()
+    );
+
+    // The horizontal thumb follows the pointer cell for cell.
+    let mut wide = files_tab(LONG_ROOT, 3);
+    let (_, root) = wide.at("/a/very");
+    let bottom = (root..).find(|&y| wide.line(y).starts_with('└')).unwrap() - 1;
+    let thumb = viewer_thumb();
+    let thumb_start = |h: &Harness| (1..).find(|&x| bg(h, (x, bottom)) == thumb).unwrap();
+    assert_eq!(thumb_start(&wide), 1);
+    wide.mouse_down((1, bottom));
+    wide.drag_to((4, bottom));
+    wide.mouse_up((4, bottom));
+    assert!((3..=4).contains(&thumb_start(&wide)), "{}", wide.screen());
+    assert!(!wide.line(root).contains("/a/very"), "{}", wide.screen());
+}
+
+#[test]
+fn a_thumb_drag_outside_the_bar_keeps_scrolling_and_selects_nothing() {
+    let (mut harness, (x, top, _)) = long_unstaged();
+    let highlight = harness.app.unstaged.highlight;
+    harness.mouse_down((x, top));
+    // Wander over the rows and past the bottom of the screen.
+    harness.drag_to((5, top + 2));
+    assert!(harness.find("file00.txt").is_none(), "{}", harness.screen());
+    harness.drag_to((5, 29));
+    assert!(harness.find("file39.txt").is_some(), "{}", harness.screen());
+    harness.mouse_up((5, 29));
+    assert_eq!(harness.app.unstaged.highlight, highlight);
+    assert!(!harness.git.calls().iter().any(|c| c.starts_with("diff")));
+    // The release ended the drag.
+    harness.hover((x, top));
+    assert!(harness.find("file39.txt").is_some());
+}

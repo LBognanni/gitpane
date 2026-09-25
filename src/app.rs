@@ -7,7 +7,7 @@ use crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 
-use crate::code_view::CodeView;
+use crate::code_view::{CodeView, Press, Scrollbar};
 use crate::document::Document;
 use crate::git::GitError;
 use crate::layout::{Panes, Splitter};
@@ -139,6 +139,8 @@ pub enum Target {
     ConfirmDiscard,
     Toast(u64),
     Splitter(Splitter),
+    /// A list or tree scrollbar.
+    Scrollbar(Focus, Scrollbar),
 }
 
 impl Target {
@@ -155,6 +157,7 @@ impl Target {
             Self::Row(s, _) | Self::Checkbox(s, _) | Self::Button(Button::Row(s, _, _)) => {
                 Some(side(s))
             }
+            Self::Scrollbar(focus, _) => Some(focus),
             Self::TreeRow(_) => Some(Focus::Commits),
             Self::FileRow(_) => Some(Focus::FilesTree),
             _ => None,
@@ -649,6 +652,8 @@ pub struct App {
     pub hits: Vec<(Rect, Target)>,
     pub panes: Panes,
     pub drag: Option<Drag>,
+    /// A dragged list or tree scrollbar thumb and where it was grabbed.
+    thumb: Option<(Focus, Scrollbar, usize)>,
 }
 
 impl App {
@@ -701,6 +706,7 @@ impl App {
             hits: Vec::new(),
             panes: Panes::default(),
             drag: None,
+            thumb: None,
         }
     }
 
@@ -1641,6 +1647,17 @@ impl App {
             }
             return Vec::new();
         }
+        if let Some((focus, bar, grab)) = self.thumb {
+            match mouse.kind {
+                MouseEventKind::Up(_) => self.thumb = None,
+                MouseEventKind::Drag(_) | MouseEventKind::Moved => {
+                    let value = bar.drag(Position::new(mouse.column, mouse.row), grab);
+                    self.set_list_scroll(focus, bar.vertical, value);
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
         // A viewer that took a press receives drags and the release.
         if let Some(focus) = self.capture
             && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
@@ -1681,6 +1698,15 @@ impl App {
                     if matches!(focus, Focus::Diff | Focus::Preview) {
                         self.capture = Some(focus);
                         self.view_mut(focus).handle_mouse(mouse);
+                    }
+                }
+                Some(Target::Scrollbar(focus, bar)) => {
+                    self.tab = focus.tab();
+                    self.focus = focus;
+                    let pos = Position::new(mouse.column, mouse.row);
+                    match bar.press(pos, self.list_scroll(focus, bar.vertical)) {
+                        Press::Grab(grab) => self.thumb = Some((focus, bar, grab)),
+                        Press::Jump(value) => self.set_list_scroll(focus, bar.vertical, value),
                     }
                 }
                 Some(Target::CloseShortcuts) => self.modal = None,
@@ -1738,15 +1764,39 @@ impl App {
         Vec::new()
     }
 
+    /// The (vertical, horizontal) scroll offsets of a list or tree.
+    fn list_axes(&mut self, focus: Focus) -> Option<(&mut usize, Option<&mut usize>)> {
+        match focus {
+            Focus::Staged => Some((&mut self.staged.offset, None)),
+            Focus::Unstaged => Some((&mut self.unstaged.offset, None)),
+            Focus::Commits => Some((&mut self.commits.offset, Some(&mut self.commits.scroll_x))),
+            Focus::FilesTree => Some((&mut self.files.offset, Some(&mut self.files.scroll_x))),
+            Focus::Diff | Focus::Preview => None,
+        }
+    }
+
+    fn list_axis(&mut self, focus: Focus, vertical: bool) -> Option<&mut usize> {
+        let (y, x) = self.list_axes(focus)?;
+        if vertical { Some(y) } else { x }
+    }
+
+    fn list_scroll(&mut self, focus: Focus, vertical: bool) -> usize {
+        self.list_axis(focus, vertical).map_or(0, |v| *v)
+    }
+
+    /// Scroll a list or tree axis without moving its cursor; `ui::render`
+    /// clamps the result.
+    fn set_list_scroll(&mut self, focus: Focus, vertical: bool, value: usize) {
+        if let Some(axis) = self.list_axis(focus, vertical) {
+            *axis = value;
+        }
+    }
+
     /// Scroll a list or tree with the wheel, leaving its cursor in place;
     /// `ui::render` clamps the result.
     fn scroll_list(&mut self, focus: Focus, mouse: MouseEvent) {
-        let (y, x) = match focus {
-            Focus::Staged => (&mut self.staged.offset, None),
-            Focus::Unstaged => (&mut self.unstaged.offset, None),
-            Focus::Commits => (&mut self.commits.offset, Some(&mut self.commits.scroll_x)),
-            Focus::FilesTree => (&mut self.files.offset, Some(&mut self.files.scroll_x)),
-            Focus::Diff | Focus::Preview => return,
+        let Some((y, x)) = self.list_axes(focus) else {
+            return;
         };
         let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
         match (mouse.kind, x) {
