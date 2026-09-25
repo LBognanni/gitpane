@@ -606,10 +606,7 @@ fn tree_rows(
     }
     if let (Some(v), Some(h)) = (vbar, hbar) {
         buf[(v.x, h.y)].reset();
-        buf[(v.x, h.y)]
-            .set_symbol("▄")
-            .set_fg(theme::SCROLLBAR_BACKGROUND)
-            .set_bg(theme::SURFACE);
+        buf[(v.x, h.y)].set_bg(theme::SCROLLBAR_BACKGROUND);
     }
     hits
 }
