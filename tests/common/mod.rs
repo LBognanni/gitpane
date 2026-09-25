@@ -166,6 +166,27 @@ impl Harness {
         self.mouse(MouseEventKind::Moved, column, row);
     }
 
+    /// Press on `from`, drag to `to`, and release there.
+    pub fn drag(&mut self, from: (u16, u16), to: (u16, u16)) {
+        self.mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1);
+        self.mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
+        self.mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1);
+    }
+
+    pub fn mouse_down(&mut self, (column, row): (u16, u16)) {
+        self.mouse(MouseEventKind::Down(MouseButton::Left), column, row);
+    }
+
+    pub fn mouse_up(&mut self, (column, row): (u16, u16)) {
+        self.mouse(MouseEventKind::Up(MouseButton::Left), column, row);
+    }
+
+    /// Resize the terminal and deliver the resize event.
+    pub fn resize(&mut self, width: u16, height: u16) {
+        self.terminal.backend_mut().resize(width, height);
+        self.send(Event::Input(Input::Resize(width, height)));
+    }
+
     pub fn draw(&mut self) -> Buffer {
         let app = &mut self.app;
         self.terminal.draw(|frame| ui::render(app, frame)).unwrap();

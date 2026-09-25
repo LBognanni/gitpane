@@ -9,6 +9,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::code_view::CodeView;
 use crate::git::GitError;
+use crate::layout::{Panes, Splitter};
 use crate::model::{FileEntry, RepoState};
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
@@ -68,6 +69,7 @@ pub enum Target {
     Backdrop,
     CloseShortcuts,
     Toast(u64),
+    Splitter(Splitter),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,16 @@ pub enum Effect {
     Git(Job),
 }
 
+/// An in-progress splitter drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Drag {
+    pub splitter: Splitter,
+    /// Pointer coordinate along the drag axis when the drag started.
+    start: u16,
+    /// Sizes of the two adjacent panes when the drag started.
+    sizes: (u16, u16),
+}
+
 pub struct App {
     pub root: PathBuf,
     pub tab: Tab,
@@ -130,6 +142,8 @@ pub struct App {
     pub hover: Option<Target>,
     /// Hit map from the last draw; the last matching entry is topmost.
     pub hits: Vec<(Rect, Target)>,
+    pub panes: Panes,
+    pub drag: Option<Drag>,
 }
 
 impl App {
@@ -151,6 +165,8 @@ impl App {
             preview_view: CodeView::new(),
             hover: None,
             hits: Vec::new(),
+            panes: Panes::default(),
+            drag: None,
         }
     }
 
@@ -281,6 +297,19 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) {
+        // A drag captures the mouse until the button is released.
+        if let Some(drag) = self.drag {
+            match mouse.kind {
+                MouseEventKind::Up(_) => self.drag = None,
+                MouseEventKind::Drag(_) | MouseEventKind::Moved => {
+                    let delta = axis(drag.splitter, mouse) as i32 - drag.start as i32;
+                    let (group, index) = self.panes.group(drag.splitter);
+                    group.drag(index, drag.sizes, delta);
+                }
+                _ => {}
+            }
+            return;
+        }
         let target = self.hit(Position::new(mouse.column, mouse.row));
         match mouse.kind {
             MouseEventKind::Moved => self.hover = target,
@@ -292,6 +321,16 @@ impl App {
                 }
                 Some(Target::CloseShortcuts) => self.modal = None,
                 Some(Target::Toast(id)) => self.toasts.retain(|toast| toast.id != id),
+                Some(Target::Splitter(splitter)) => {
+                    let start = axis(splitter, mouse);
+                    let (group, index) = self.panes.group(splitter);
+                    let sizes = group.start_drag(index);
+                    self.drag = Some(Drag {
+                        splitter,
+                        start,
+                        sizes,
+                    });
+                }
                 // Change buttons stay disabled until the diff pane story.
                 Some(Target::Button(_) | Target::Backdrop) | None => {}
             },
@@ -305,5 +344,13 @@ impl App {
             .rev()
             .find(|(rect, _)| rect.contains(position))
             .map(|(_, target)| *target)
+    }
+}
+
+/// The pointer coordinate along `splitter`'s drag axis.
+fn axis(splitter: Splitter, mouse: MouseEvent) -> u16 {
+    match splitter {
+        Splitter::Section(_) => mouse.row,
+        Splitter::Sidebar | Splitter::Files => mouse.column,
     }
 }
