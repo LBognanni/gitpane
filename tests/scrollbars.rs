@@ -60,14 +60,29 @@ fn files_tree_shows_scrollbars_only_when_it_overflows() {
     let x = bar_column(&small, 4);
     assert_eq!(bg(&small, (x, 4)), bg(&small, (x - 5, 4)));
     let bottom = small.find("└──").unwrap().1 - 1;
-    assert_eq!(bg(&small, (1, bottom)), bg(&small, (5, bottom)));
+    assert_eq!(small.buffer()[(1, bottom)], small.buffer()[(5, bottom)]);
 
     let thumb = viewer_thumb();
     let tall = files_tab("/repo", 40);
     assert_eq!(bg(&tall, (x, 4)), thumb, "vertical thumb");
     let wide = files_tab(LONG_ROOT, 3);
     let bottom = wide.find("└──").unwrap().1 - 1;
-    assert_eq!(bg(&wide, (1, bottom)), thumb, "horizontal thumb");
+    assert_eq!(wide.buffer()[(1, bottom)].fg, thumb, "horizontal thumb");
+}
+
+#[test]
+fn files_tree_horizontal_bar_is_a_half_height_bar_on_the_pane() {
+    let wide = files_tab(LONG_ROOT, 3);
+    let (_, row) = wide.at("file00.txt");
+    let bottom = wide.find("└──").unwrap().1 - 1;
+    let pane = wide.buffer()[(bar_column(&wide, row) - 1, row)].bg;
+    let thumb = &wide.buffer()[(1, bottom)];
+    let track = &wide.buffer()[(bar_column(&wide, row), bottom)];
+    assert_eq!(thumb.symbol(), "▀");
+    assert_eq!(track.symbol(), "▀");
+    assert_ne!(thumb.fg, track.fg);
+    assert_eq!(thumb.bg, pane);
+    assert_eq!(track.bg, pane);
 }
 
 #[test]
@@ -126,7 +141,7 @@ fn commit_tree_and_status_lists_show_scrollbars_when_they_overflow() {
         .find(|&y| harness.line(y).starts_with('└'))
         .unwrap()
         - 1;
-    assert_eq!(bg(&harness, (1, bottom)), thumb, "horizontal thumb");
+    assert_eq!(harness.buffer()[(1, bottom)].fg, thumb, "horizontal thumb");
 }
 
 #[test]
@@ -266,7 +281,11 @@ fn dragging_a_tree_thumb_scrolls_both_axes_proportionally() {
     let (_, root) = wide.at("/a/very");
     let bottom = (root..).find(|&y| wide.line(y).starts_with('└')).unwrap() - 1;
     let thumb = viewer_thumb();
-    let thumb_start = |h: &Harness| (1..).find(|&x| bg(h, (x, bottom)) == thumb).unwrap();
+    let thumb_start = |h: &Harness| {
+        (1..)
+            .find(|&x| h.buffer()[(x, bottom)].fg == thumb)
+            .unwrap()
+    };
     assert_eq!(thumb_start(&wide), 1);
     wide.mouse_down((1, bottom));
     wide.drag_to((4, bottom));
