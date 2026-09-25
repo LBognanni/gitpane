@@ -41,7 +41,7 @@ jobs:
           version="$("$BIN" --version)"
           echo "$version"
           [ "$GITHUB_REF_TYPE" != tag ] || [ "$version" = "gitpane ${GITHUB_REF_NAME#v}" ]
-      - run: tar -czf gitpane-${{ matrix.target }}.tar.gz -C "$(dirname "$BIN")" gitpane
+      - run: tar -czf gitpane-${{ matrix.target }}.tar.gz -C "$(dirname "$BIN")" gitpane -C "$GITHUB_WORKSPACE" LICENSE
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
