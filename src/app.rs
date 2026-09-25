@@ -12,12 +12,23 @@ use crate::document::Document;
 use crate::git::GitError;
 use crate::layout::{Panes, Splitter};
 use crate::model::{Commit, CommitFile, DiffEntry, FileEntry, RepoState, Side};
+use crate::watcher::{Invalidation, Watch};
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 /// Most file jump results listed.
 pub const MAX_FILE_JUMP_RESULTS: usize = 100;
 /// Context rows kept above a change when scrolling to it.
 const CHANGE_CONTEXT: usize = 4;
+/// Shown when the entry of the open diff disappears from its side.
+pub const MISSING: &str = "The selected change is no longer present.";
+
+/// Automatic work whose failures warn once per streak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Streak {
+    Status,
+    History,
+    Diff,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -433,6 +444,11 @@ pub enum Job {
         root: PathBuf,
         token: u64,
     },
+    /// An automatic status read with the current (unincremented) token.
+    AutoStatus {
+        root: PathBuf,
+        token: u64,
+    },
     /// Run `action` on `entries`, then read status, in one job.
     Mutate {
         root: PathBuf,
@@ -480,6 +496,13 @@ pub enum Event {
         result: Result<RepoState, GitError>,
         failed: Option<(Action, GitError)>,
     },
+    /// An automatic status read for request `token`.
+    AutoStatus {
+        token: u64,
+        result: Result<RepoState, GitError>,
+    },
+    /// A watcher message.
+    Watch(Watch),
     /// A diff document for request `token`.
     Diff {
         token: u64,
@@ -536,6 +559,16 @@ pub struct App {
     pub unstaged: StatusList,
     pub status_loading: bool,
     status_token: u64,
+    /// The status last applied to the lists.
+    applied_state: Option<RepoState>,
+    /// Invalidations waiting for an automatic read.
+    auto_pending: Option<Invalidation>,
+    /// The invalidation of the automatic read in flight.
+    auto_in_flight: Option<Invalidation>,
+    /// Automatic work currently in a failure streak.
+    failing: Vec<Streak>,
+    /// The watcher reported `Started`.
+    watch_started: bool,
     /// The entry whose diff was last requested.
     pub selection: Option<DiffEntry>,
     pub commits: CommitTree,
@@ -543,6 +576,8 @@ pub struct App {
     /// A commit's files are loading.
     pub files_loading: bool,
     history_token: u64,
+    /// The pending history load is a quiet refresh.
+    history_quiet: bool,
     /// The commits last applied to the tree.
     applied_commits: Option<Vec<Commit>>,
     commit_files_token: u64,
@@ -551,6 +586,8 @@ pub struct App {
     diff_token: u64,
     /// A normal diff load is pending.
     pub diff_loading: bool,
+    /// The pending diff load is a quiet reload.
+    diff_quiet: bool,
     /// The current change of the diff document, if it has any.
     change_index: Option<usize>,
     /// The viewer receiving mouse drags until the button is released.
@@ -589,16 +626,23 @@ impl App {
             unstaged: StatusList::default(),
             status_loading: true,
             status_token: 0,
+            applied_state: None,
+            auto_pending: None,
+            auto_in_flight: None,
+            failing: Vec::new(),
+            watch_started: false,
             selection: None,
             commits: CommitTree::default(),
             history_loading: false,
             files_loading: false,
             history_token: 0,
+            history_quiet: false,
             applied_commits: None,
             commit_files_token: 0,
             files_for: 0,
             diff_token: 0,
             diff_loading: false,
+            diff_quiet: false,
             change_index: None,
             capture: None,
             modal: show_shortcuts.then_some(Modal::Shortcuts),
@@ -774,8 +818,14 @@ impl App {
 
     /// Manual history refresh: show loading on the tree, then load.
     fn refresh_history(&mut self) -> Vec<Effect> {
-        self.history_token += 1;
         self.history_loading = true;
+        self.load_history(false)
+    }
+
+    /// Request history; a quiet load shows no loading state and warns once per streak.
+    fn load_history(&mut self, quiet: bool) -> Vec<Effect> {
+        self.history_token += 1;
+        self.history_quiet = quiet;
         vec![Effect::Git(Job::History {
             root: self.root.clone(),
             token: self.history_token,
@@ -783,7 +833,7 @@ impl App {
     }
 
     /// Apply loaded commits; an unchanged list keeps the tree exactly.
-    fn apply_history(&mut self, commits: Vec<Commit>) {
+    fn apply_history(&mut self, commits: Vec<Commit>, quiet: bool) {
         if self.applied_commits.as_ref() == Some(&commits) {
             return;
         }
@@ -803,7 +853,8 @@ impl App {
             .iter()
             .position(|commit| Some(&commit.hash) == target.as_ref());
         self.applied_commits = Some(commits);
-        if !self.commits.nodes.is_empty()
+        if !quiet
+            && !self.commits.nodes.is_empty()
             && self.staged.entries.is_empty()
             && self.unstaged.entries.is_empty()
         {
@@ -953,6 +1004,7 @@ impl App {
         self.diff_title = path.clone();
         self.change_index = None;
         self.diff_token += 1;
+        self.diff_quiet = false;
         if let Some(reason) = reason.cloned() {
             self.selection = Some(entry);
             self.diff_loading = false;
@@ -1103,14 +1155,54 @@ impl App {
                     Err(error) => self.git_error("refresh status", &error),
                 }
             }
+            Event::AutoStatus { token, result } => {
+                let invalidation = self.auto_in_flight.take().unwrap_or_default();
+                if token != self.status_token {
+                    self.merge_pending(invalidation);
+                    return self.start_auto_read();
+                }
+                return match result {
+                    Ok(state) => {
+                        self.failing.retain(|s| *s != Streak::Status);
+                        let mut effects = self.quiet_apply(state, invalidation);
+                        effects.extend(self.start_auto_read());
+                        effects
+                    }
+                    Err(error) => {
+                        self.merge_pending(invalidation);
+                        self.auto_failure(Streak::Status, &error);
+                        Vec::new()
+                    }
+                };
+            }
+            Event::Watch(Watch::Started) => self.watch_started = true,
+            Event::Watch(Watch::Changed(invalidation)) => {
+                if invalidation.status {
+                    self.merge_pending(invalidation);
+                    return self.start_auto_read();
+                }
+            }
+            Event::Watch(Watch::Stopped) => {
+                let body = if self.watch_started {
+                    "Automatic refresh stopped. Press r to refresh manually."
+                } else {
+                    "Automatic refresh could not start. Press r to refresh manually."
+                };
+                self.notify(None, body, Severity::Warning);
+            }
             Event::Diff { token, result } => {
                 if token != self.diff_token {
                     return Vec::new();
                 }
                 self.diff_loading = false;
-                match result {
-                    Ok(doc) => self.apply_diff(doc),
-                    Err(error) => self.git_error("load diff", &error),
+                match (result, self.diff_quiet) {
+                    (Ok(doc), false) => self.apply_diff(doc),
+                    (Err(error), false) => self.git_error("load diff", &error),
+                    (Ok(doc), true) => {
+                        self.failing.retain(|s| *s != Streak::Diff);
+                        self.apply_quiet_diff(doc);
+                    }
+                    (Err(error), true) => self.auto_failure(Streak::Diff, &error),
                 }
             }
             Event::History { token, result } => {
@@ -1118,8 +1210,15 @@ impl App {
                     return Vec::new();
                 }
                 self.history_loading = false;
+                let quiet = self.history_quiet;
                 match result {
-                    Ok(commits) => self.apply_history(commits),
+                    Ok(commits) => {
+                        if quiet {
+                            self.failing.retain(|s| *s != Streak::History);
+                        }
+                        self.apply_history(commits, quiet);
+                    }
+                    Err(error) if quiet => self.auto_failure(Streak::History, &error),
                     Err(error) => self.git_error("refresh history", &error),
                 }
             }
@@ -1156,10 +1255,113 @@ impl App {
 
     /// Rebuild both lists, invalidate the diff pane, and update the branch.
     fn apply_status(&mut self, state: RepoState) {
-        self.branch = state.branch;
-        self.staged = StatusList::new(state.staged);
-        self.unstaged = StatusList::new(state.unstaged);
+        self.branch = state.branch.clone();
+        self.staged = StatusList::new(state.staged.clone());
+        self.unstaged = StatusList::new(state.unstaged.clone());
         self.invalidate_diff();
+        self.applied_state = Some(state);
+    }
+
+    fn merge_pending(&mut self, invalidation: Invalidation) {
+        match &mut self.auto_pending {
+            Some(pending) => pending.merge(invalidation),
+            None => self.auto_pending = Some(invalidation),
+        }
+    }
+
+    /// Start an automatic read of the pending invalidation unless one is in flight.
+    fn start_auto_read(&mut self) -> Vec<Effect> {
+        if self.auto_in_flight.is_some() {
+            return Vec::new();
+        }
+        let Some(pending) = self.auto_pending.take() else {
+            return Vec::new();
+        };
+        self.auto_in_flight = Some(pending);
+        vec![Effect::Git(Job::AutoStatus {
+            root: self.root.clone(),
+            token: self.status_token,
+        })]
+    }
+
+    /// Warn once per failure streak of `streak`.
+    fn auto_failure(&mut self, streak: Streak, error: &GitError) {
+        if self.failing.contains(&streak) {
+            return;
+        }
+        self.failing.push(streak);
+        let body = format!("Automatic refresh failed: {error}. Press r to refresh manually.");
+        self.notify(None, &body, Severity::Warning);
+    }
+
+    /// Apply an automatic status read without moving focus or showing loading.
+    fn quiet_apply(&mut self, state: RepoState, invalidation: Invalidation) -> Vec<Effect> {
+        if self.applied_state.as_ref() != Some(&state) {
+            self.branch = state.branch.clone();
+            rebuild(&mut self.staged, state.staged.clone());
+            rebuild(&mut self.unstaged, state.unstaged.clone());
+        }
+        let mut effects = self.reconcile_diff(&state, &invalidation);
+        if invalidation.history {
+            effects.extend(self.load_history(true));
+        }
+        self.applied_state = Some(state);
+        effects
+    }
+
+    /// Clear or quietly reload the open working-tree diff after a quiet apply.
+    fn reconcile_diff(&mut self, state: &RepoState, invalidation: &Invalidation) -> Vec<Effect> {
+        let Some(DiffEntry::File(selection)) = &self.selection else {
+            return Vec::new();
+        };
+        let entries = match selection.side {
+            Side::Staged => &state.staged,
+            Side::Unstaged => &state.unstaged,
+        };
+        let Some(current) = entries.iter().find(|e| e.path == selection.path).cloned() else {
+            self.invalidate_diff();
+            self.diff_view.set_document(Document::message(MISSING));
+            return Vec::new();
+        };
+        let stale = match current.side {
+            Side::Staged => invalidation.index_changed || invalidation.history,
+            Side::Unstaged => {
+                invalidation.changed_paths.contains(&current.path)
+                    || invalidation.history
+                    || (invalidation.index_changed && current.status != '?')
+            }
+        };
+        if !stale {
+            return Vec::new();
+        }
+        if current.unsupported_reason.is_some() {
+            return self.select(current);
+        }
+        self.selection = Some(DiffEntry::File(current.clone()));
+        self.diff_token += 1;
+        self.diff_quiet = true;
+        self.diff_loading = false;
+        vec![Effect::Git(Job::Diff {
+            root: self.root.clone(),
+            entry: DiffEntry::File(current),
+            token: self.diff_token,
+        })]
+    }
+
+    /// Replace the diff quietly, keeping scroll, wrap, and a still-valid change index.
+    fn apply_quiet_diff(&mut self, doc: Document) {
+        if same_document(self.diff_view.document(), &doc) {
+            return;
+        }
+        if self
+            .change_index
+            .is_none_or(|index| index >= doc.changes.len())
+        {
+            self.change_index = (!doc.changes.is_empty()).then_some(0);
+        }
+        let (x, y) = self.diff_view.scroll_offset();
+        self.diff_view.set_document(doc);
+        self.diff_view.scroll_to(x, y);
     }
 
     /// Highlight and focus the first entry, Staged before Unstaged (manual loads only).
@@ -1487,4 +1689,34 @@ fn axis(splitter: Splitter, mouse: MouseEvent) -> u16 {
         Splitter::Section(_) => mouse.row,
         Splitter::Sidebar | Splitter::Files => mouse.column,
     }
+}
+
+/// Replace `list`'s entries, keeping its highlighted and checked rows by path.
+fn rebuild(list: &mut StatusList, entries: Vec<FileEntry>) {
+    let highlighted = list.highlighted().map(|entry| entry.path.clone());
+    let checked: Vec<String> = list
+        .checked_entries()
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    let mut rebuilt = StatusList::new(entries);
+    rebuilt.offset = list.offset;
+    for (index, entry) in rebuilt.entries.iter().enumerate() {
+        if Some(&entry.path) == highlighted.as_ref() {
+            rebuilt.highlight = Some(index);
+        }
+        rebuilt.checked[index] =
+            entry.unsupported_reason.is_none() && checked.contains(&entry.path);
+    }
+    *list = rebuilt;
+}
+
+/// Whether two documents show the same rows and changes.
+fn same_document(a: &Document, b: &Document) -> bool {
+    a.changes == b.changes
+        && a.rows.len() == b.rows.len()
+        && a.rows
+            .iter()
+            .zip(&b.rows)
+            .all(|(x, y)| x.gutter == y.gutter && x.text == y.text)
 }

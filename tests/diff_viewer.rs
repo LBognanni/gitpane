@@ -2,9 +2,10 @@ mod common;
 
 use common::{Harness, failure, state};
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
-use gitpane::app::Focus;
+use gitpane::app::{Event, Focus, Severity};
 use gitpane::document::diff_document;
 use gitpane::model::{FileEntry, Side};
+use gitpane::watcher::{Invalidation, Watch};
 use ratatui::style::Modifier;
 
 /// First column of the diff pane (sidebar plus splitter).
@@ -538,4 +539,93 @@ fn stale_diff_failure_leaves_the_newer_diff_without_a_toast() {
     assert!(harness.app.toasts.is_empty());
     assert!(harness.line(1).contains("new.py"));
     assert_eq!(diff_text(&harness), visible);
+}
+
+/// Deliver a watcher edit of `a.txt`, which quietly reloads its open diff.
+fn edit_a(harness: &mut Harness) {
+    let invalidation = Invalidation {
+        status: true,
+        changed_paths: ["a.txt".to_string()].into(),
+        ..Invalidation::default()
+    };
+    harness.send(Event::Watch(Watch::Changed(invalidation)));
+}
+
+#[test]
+fn quiet_reload_keeps_scroll_clamped_wrap_and_change_index() {
+    let lines = |count| numbered(count, |i| format!("line {i}"));
+    let mut harness = Harness::with(Ok(state(&[], &["a.txt"])), false, 80, 12);
+    harness.press(KeyCode::Char('w'));
+    load(&mut harness, patch(&lines(100), &[10, 30, 70]));
+    harness.press(KeyCode::Char('n'));
+    harness.app.diff_view.scroll_to(0, 40);
+    harness.draw();
+
+    harness
+        .git
+        .set_diff("a.txt", Ok(patch(&lines(120), &[10, 30, 70])));
+    edit_a(&mut harness);
+    assert_eq!(scroll(&harness), (0, 40));
+    assert!(
+        enabled(&harness, '↑') && enabled(&harness, '↓'),
+        "still on change 2"
+    );
+    assert!(harness.app.diff_view.wrapped());
+    assert!(!diff_text(&harness).contains("Loading…"));
+
+    harness.git.set_diff("a.txt", Ok(patch(&lines(30), &[10])));
+    edit_a(&mut harness);
+    let (_, max_y) = harness.app.diff_view.max_scroll();
+    assert_eq!(scroll(&harness).1, max_y);
+    assert!(max_y < 40);
+    assert!(
+        !enabled(&harness, '↑') && !enabled(&harness, '↓'),
+        "reset to change 1"
+    );
+    assert!(diff_text(&harness).contains("line 29"));
+}
+
+#[test]
+fn quiet_reload_of_an_equal_diff_leaves_the_document_untouched() {
+    let text = patch(&numbered(100, |i| format!("line {i}")), &[10]);
+    let mut harness = open(80, 12, text.clone());
+    harness.app.diff_view.scroll_to(0, 20);
+    harness.draw();
+    let start = PANE_X + GUTTER;
+    harness.drag((start, 3), (start + 4, 3));
+    let before = harness.buffer();
+
+    edit_a(&mut harness);
+    assert_eq!(scroll(&harness), (0, 20));
+    assert_eq!(harness.buffer(), before, "the text selection survives");
+}
+
+#[test]
+fn quiet_reload_failure_keeps_the_document_and_scroll() {
+    let mut harness = open(
+        80,
+        12,
+        patch(&numbered(100, |i| format!("line {i}")), &[10]),
+    );
+    harness.app.diff_view.scroll_to(0, 20);
+    harness.draw();
+    // The rows above the warning toast.
+    let top = |harness: &Harness| {
+        diff_text(harness)
+            .lines()
+            .take(5)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let before = top(&harness);
+    harness
+        .git
+        .set_diff("a.txt", Err(failure("fatal: diff failed")));
+
+    edit_a(&mut harness);
+    assert_eq!(scroll(&harness), (0, 20));
+    assert_eq!(top(&harness), before);
+    assert!(before.contains("line 20"));
+    let severities: Vec<Severity> = harness.app.toasts.iter().map(|t| t.severity).collect();
+    assert_eq!(severities, [Severity::Warning]);
 }

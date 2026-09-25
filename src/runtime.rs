@@ -13,6 +13,7 @@ use crate::document::{diff_document, load_preview};
 use crate::git::{GitApi, GitError};
 use crate::model::{DiffEntry, FileEntry};
 use crate::ui;
+use crate::watcher;
 
 /// The platform location of the first-launch marker, if one can be determined.
 pub fn default_marker() -> Option<PathBuf> {
@@ -41,6 +42,10 @@ pub fn run_job(git: &dyn GitApi, job: Job) -> Event {
             token,
             result: git.status(&root),
             failed: None,
+        },
+        Job::AutoStatus { root, token } => Event::AutoStatus {
+            token,
+            result: git.status(&root),
         },
         Job::Mutate {
             root,
@@ -174,6 +179,7 @@ struct Workers {
 pub fn run(terminal: &mut DefaultTerminal, git: Arc<dyn GitApi>, mut app: App) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_input(tx.clone());
+    watcher::spawn(git.clone(), app.root.clone(), tx.clone());
     let jobs = Workers {
         git: spawn_git(git.clone(), tx.clone()),
         diff: spawn_latest(git.clone(), tx.clone()),
