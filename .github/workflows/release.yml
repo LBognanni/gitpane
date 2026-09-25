@@ -1,0 +1,77 @@
+# Build binaries and publish them as a GitHub release: a pushed v* tag makes a
+# release, a push to any branch but main makes a beta prerelease for testing.
+name: Release
+
+on:
+  push:
+    branches-ignore: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    env:
+      BIN: target/${{ matrix.target }}/release/gitpane
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo CC=musl-gcc >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Check version
+        # The Intel macOS binary is cross-compiled and cannot run here.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          version="$("$BIN" --version)"
+          echo "$version"
+          [ "$GITHUB_REF_TYPE" != tag ] || [ "$version" = "gitpane ${GITHUB_REF_NAME#v}" ]
+      - run: tar -czf gitpane-${{ matrix.target }}.tar.gz -C "$(dirname "$BIN")" gitpane
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: gitpane-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      # With assets, gh creates a draft, uploads everything, then publishes,
+      # so an immutable release is complete when it goes public. Tags created
+      # with GITHUB_TOKEN do not trigger this workflow again.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+            set -- --verify-tag --generate-notes
+          else
+            version="$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)"
+            tag="v$version-beta.$GITHUB_RUN_NUMBER"
+            set -- --prerelease --target "$GITHUB_SHA" --notes "Beta build of $GITHUB_REF_NAME at $GITHUB_SHA."
+          fi
+          # Each release's installer defaults to that release.
+          sed -i "s/GITPANE_VERSION:-latest/GITPANE_VERSION:-$tag/" install.sh
+          grep -q "GITPANE_VERSION:-$tag" install.sh
+          gh release create "$tag" dist/*.tar.gz install.sh "$@"
