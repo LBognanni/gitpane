@@ -189,10 +189,22 @@ fn status_actions_support_single_bulk_and_confirmed_discard() {
         harness.git.calls().len() == start,
         "nothing runs before confirming"
     );
-    let cancel = &harness.buffer()[harness.at("Cancel")];
-    let confirm = &harness.buffer()[discard_button(&harness)];
-    assert!(cancel.modifier.contains(Modifier::REVERSED));
-    assert!(!confirm.modifier.contains(Modifier::REVERSED));
+    // Each button is one solid block: its label row matches its edge rows.
+    // Focus tints the focused button instead of reversing its label.
+    let block = |harness: &Harness, (x, y): (u16, u16)| {
+        let buffer = harness.buffer();
+        let label = &buffer[(x, y)];
+        assert!(!label.modifier.contains(Modifier::REVERSED));
+        assert_eq!(label.bg, buffer[(x, y - 1)].bg);
+        assert_eq!(label.bg, buffer[(x, y + 1)].bg);
+        label.bg
+    };
+    let focused_cancel = block(&harness, harness.at("Cancel"));
+    let unfocused_discard = block(&harness, discard_button(&harness));
+    harness.press(KeyCode::Tab);
+    assert_ne!(block(&harness, harness.at("Cancel")), focused_cancel);
+    assert_ne!(block(&harness, discard_button(&harness)), unfocused_discard);
+    harness.press(KeyCode::Tab);
     // Both are three-row, sixteen-cell buttons with ▔ and ▁ edges.
     let (x, y) = harness.at("Cancel");
     let edges = |y: u16| -> String {

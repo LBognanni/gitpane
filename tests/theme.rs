@@ -70,14 +70,6 @@ fn surfaces_and_text_are_readable() {
 }
 
 #[test]
-fn focus_border_is_distinguishable_from_the_list() {
-    let harness = Harness::new(Ok(state(&["a.txt"], &[])));
-    let (_, y) = harness.at("a.txt");
-    let border = &harness.buffer()[(0, y)];
-    assert!(contrast(border.fg, border.bg) >= INDICATOR_FLOOR);
-}
-
-#[test]
 fn shortcuts_dialog_and_toasts_are_readable() {
     let error = GitError::Failed {
         code: Some(128),

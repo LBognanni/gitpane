@@ -26,8 +26,6 @@ highlighting, while keeping the current workflow and appearance.
   - The line-number gutter widens for files with more than 9,999 lines instead
     of misaligning.
   - The Files tab tree gets the same draggable splitter as the Changes sidebar.
-  - Focused lists and trees show the focus border (the Python TCSS never shows
-    it; see the `docs/milestones.md` completion notes).
   - Startup is effectively instant and the app ships as a single binary.
 
 ### Out of scope
@@ -486,7 +484,8 @@ One component serves both the diff and preview viewers. Port the behavior of
   (gutter plus source). Cropping and horizontal scrolling use terminal cell
   widths (`unicode-width`), so wide characters are never split.
 - **Unwrapped mode:** horizontal scroll range is the widest row. Both
-  scrollbars appear when content overflows.
+  scrollbars appear when content overflows. The vertical scrollbar is two
+  columns wide, like Textual's default.
 - **Wrapped mode:**
   - Rows wrap at word boundaries and fold words longer than the width.
     Continuation rows are indented by the document's wrap indent (clamped to
@@ -562,7 +561,8 @@ Ported from `gitpane/widgets/splitter.py`:
 
 - A vertical splitter draws `│` down its full height; a horizontal splitter
   draws `─` across its full width, in the `$border` color. While hovered, and
-  for the whole drag, it uses the `$accent` color.
+  for the whole drag, it uses the `$accent` color. Section splitters sit on the
+  sidebar's `$surface`; the others sit on `$canvas`.
 - Pressing the left button on a splitter starts a drag. Motion events resize
   the panes, and releasing the button ends the drag. The drag continues even if
   the pointer leaves the splitter cell.
@@ -612,7 +612,11 @@ Ported from `gitpane/widgets/splitter.py`:
   - The sidebar holds three sections (`Staged`, `Unstaged`, `Commits`)
     separated by horizontal splitters.
   - Each section has a one-row title bar and a bordered list or tree below it.
-  - The border is `$border`, or `$focus` when the list or tree has focus.
+  - The border is always `$border`, like Python; focus shows through the
+    highlighted row.
+  - Lists and trees show scrollbars when they overflow, like Python: status
+    lists scroll vertically, the Commits and Files trees both ways. The wheel
+    scrolls them (Shift+wheel horizontally) without moving the cursor.
 - **Diff pane:** a title row showing the entry path on the left (truncated to
   one row) and the `↑` and `↓` change buttons right-aligned, followed by the
   CodeView.
@@ -823,7 +827,7 @@ Port the tokens from `gitpane/app.tcss`:
 | `danger` | `#ff7b72` (discard buttons on hover) |
 
 Panel titles, viewer titles, and the status bar are bold `muted-text` on
-`raised-surface`. Scrollbars use `accent`.
+`raised-surface`. Every scrollbar thumb uses `accent` on a `canvas` track.
 
 ## 11. Refresh and concurrency rules
 

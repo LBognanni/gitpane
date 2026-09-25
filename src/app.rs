@@ -19,6 +19,8 @@ const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 pub const MAX_FILE_JUMP_RESULTS: usize = 100;
 /// Context rows kept above a change when scrolling to it.
 const CHANGE_CONTEXT: usize = 4;
+/// Rows or columns scrolled per mouse wheel step in lists and trees.
+const WHEEL: usize = 3;
 /// Shown when the entry of the open diff disappears from its side.
 pub const MISSING: &str = "The selected change is no longer present.";
 
@@ -139,6 +141,27 @@ pub enum Target {
     Splitter(Splitter),
 }
 
+impl Target {
+    /// The list or tree pane this target lies in, if any.
+    fn list_pane(self) -> Option<Focus> {
+        let side = |side| match side {
+            Side::Staged => Focus::Staged,
+            Side::Unstaged => Focus::Unstaged,
+        };
+        match self {
+            Self::Pane(
+                focus @ (Focus::Staged | Focus::Unstaged | Focus::Commits | Focus::FilesTree),
+            ) => Some(focus),
+            Self::Row(s, _) | Self::Checkbox(s, _) | Self::Button(Button::Row(s, _, _)) => {
+                Some(side(s))
+            }
+            Self::TreeRow(_) => Some(Focus::Commits),
+            Self::FileRow(_) => Some(Focus::FilesTree),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     Shortcuts,
@@ -180,6 +203,8 @@ pub struct StatusList {
     pub highlight: Option<usize>,
     /// First visible row, kept by `ui::render` so the highlight stays visible.
     pub offset: usize,
+    /// Highlight last scrolled into view; the wheel scrolls freely until it moves.
+    pub followed: Option<usize>,
 }
 
 impl StatusList {
@@ -189,6 +214,7 @@ impl StatusList {
             entries,
             highlight: None,
             offset: 0,
+            followed: None,
         }
     }
 
@@ -256,6 +282,10 @@ pub struct CommitTree {
     pub cursor: Option<usize>,
     /// First visible row, kept by `ui::render` so the cursor stays visible.
     pub offset: usize,
+    /// First visible cell column.
+    pub scroll_x: usize,
+    /// Cursor row last scrolled into view; the wheel scrolls freely until it moves.
+    pub followed: Option<usize>,
 }
 
 impl CommitTree {
@@ -316,6 +346,10 @@ pub struct FileTree {
     pub cursor: Option<usize>,
     /// First visible row, kept by `ui::render` so the cursor stays visible.
     pub offset: usize,
+    /// First visible cell column.
+    pub scroll_x: usize,
+    /// Cursor row last scrolled into view; the wheel scrolls freely until it moves.
+    pub followed: Option<usize>,
 }
 
 impl FileTree {
@@ -371,7 +405,7 @@ impl FileTree {
         Self {
             nodes,
             cursor: Some(0),
-            offset: 0,
+            ..Self::default()
         }
     }
 
@@ -1625,6 +1659,8 @@ impl App {
             | MouseEventKind::ScrollRight => {
                 if let Some(Target::Pane(focus @ (Focus::Diff | Focus::Preview))) = target {
                     self.view_mut(focus).handle_mouse(mouse);
+                } else if let Some(focus) = target.and_then(Target::list_pane) {
+                    self.scroll_list(focus, mouse);
                 } else if let Some(Target::JumpDialog | Target::JumpResult(_)) = target {
                     // The wheel scrolls the results without moving the highlight.
                     match mouse.kind {
@@ -1700,6 +1736,28 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Scroll a list or tree with the wheel, leaving its cursor in place;
+    /// `ui::render` clamps the result.
+    fn scroll_list(&mut self, focus: Focus, mouse: MouseEvent) {
+        let (y, x) = match focus {
+            Focus::Staged => (&mut self.staged.offset, None),
+            Focus::Unstaged => (&mut self.unstaged.offset, None),
+            Focus::Commits => (&mut self.commits.offset, Some(&mut self.commits.scroll_x)),
+            Focus::FilesTree => (&mut self.files.offset, Some(&mut self.files.scroll_x)),
+            Focus::Diff | Focus::Preview => return,
+        };
+        let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+        match (mouse.kind, x) {
+            (MouseEventKind::ScrollUp, Some(x)) if shift => *x = x.saturating_sub(WHEEL),
+            (MouseEventKind::ScrollDown, Some(x)) if shift => *x += WHEEL,
+            (MouseEventKind::ScrollLeft, Some(x)) => *x = x.saturating_sub(WHEEL),
+            (MouseEventKind::ScrollRight, Some(x)) => *x += WHEEL,
+            (MouseEventKind::ScrollUp, _) => *y = y.saturating_sub(WHEEL),
+            (MouseEventKind::ScrollDown, _) => *y += WHEEL,
+            _ => {}
+        }
     }
 
     fn hit(&self, position: Position) -> Option<Target> {
