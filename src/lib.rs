@@ -1,5 +1,8 @@
 pub mod app;
+pub mod diff;
+pub mod document;
 pub mod git;
+pub mod highlight;
 pub mod model;
 pub mod runtime;
 pub mod theme;
