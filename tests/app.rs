@@ -231,6 +231,17 @@ fn shortcut_popup_opens_on_first_launch_and_with_h() {
 }
 
 #[test]
+fn hovering_the_close_button_lightens_it() {
+    let mut harness = Harness::with(Ok(state(&[], &[])), true, 100, 30);
+    let close = harness.at("Close");
+    let before = harness.buffer()[close].bg;
+    harness.hover(close);
+    assert_ne!(harness.buffer()[close].bg, before);
+    harness.hover((0, 0));
+    assert_eq!(harness.buffer()[close].bg, before);
+}
+
+#[test]
 fn close_button_is_a_three_row_textual_button() {
     let mut harness = Harness::with(Ok(state(&[], &[])), true, 100, 30);
     let (x, y) = harness.at("Close");

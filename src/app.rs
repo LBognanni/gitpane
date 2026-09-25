@@ -141,6 +141,8 @@ pub enum Target {
     Splitter(Splitter),
     /// A list or tree scrollbar.
     Scrollbar(Focus, Scrollbar),
+    /// The file jump results scrollbar.
+    JumpScrollbar(Scrollbar),
 }
 
 impl Target {
@@ -652,8 +654,9 @@ pub struct App {
     pub hits: Vec<(Rect, Target)>,
     pub panes: Panes,
     pub drag: Option<Drag>,
-    /// A dragged list or tree scrollbar thumb and where it was grabbed.
-    thumb: Option<(Focus, Scrollbar, usize)>,
+    /// A dragged scrollbar thumb (a list or tree, or the jump results when
+    /// `None`) and where it was grabbed.
+    thumb: Option<(Option<Focus>, Scrollbar, usize)>,
 }
 
 impl App {
@@ -1652,7 +1655,10 @@ impl App {
                 MouseEventKind::Up(_) => self.thumb = None,
                 MouseEventKind::Drag(_) | MouseEventKind::Moved => {
                     let value = bar.drag(Position::new(mouse.column, mouse.row), grab);
-                    self.set_list_scroll(focus, bar.vertical, value);
+                    match focus {
+                        Some(focus) => self.set_list_scroll(focus, bar.vertical, value),
+                        None => self.jump_offset = value,
+                    }
                 }
                 _ => {}
             }
@@ -1678,7 +1684,10 @@ impl App {
                     self.view_mut(focus).handle_mouse(mouse);
                 } else if let Some(focus) = target.and_then(Target::list_pane) {
                     self.scroll_list(focus, mouse);
-                } else if let Some(Target::JumpDialog | Target::JumpResult(_)) = target {
+                } else if let Some(
+                    Target::JumpDialog | Target::JumpResult(_) | Target::JumpScrollbar(_),
+                ) = target
+                {
                     // The wheel scrolls the results without moving the highlight.
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
@@ -1705,8 +1714,15 @@ impl App {
                     self.focus = focus;
                     let pos = Position::new(mouse.column, mouse.row);
                     match bar.press(pos, self.list_scroll(focus, bar.vertical)) {
-                        Press::Grab(grab) => self.thumb = Some((focus, bar, grab)),
+                        Press::Grab(grab) => self.thumb = Some((Some(focus), bar, grab)),
                         Press::Jump(value) => self.set_list_scroll(focus, bar.vertical, value),
+                    }
+                }
+                Some(Target::JumpScrollbar(bar)) => {
+                    let pos = Position::new(mouse.column, mouse.row);
+                    match bar.press(pos, self.jump_offset) {
+                        Press::Grab(grab) => self.thumb = Some((None, bar, grab)),
+                        Press::Jump(value) => self.jump_offset = value,
                     }
                 }
                 Some(Target::CloseShortcuts) => self.modal = None,

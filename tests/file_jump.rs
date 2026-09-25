@@ -290,3 +290,102 @@ fn typing_after_scrolling_shows_the_first_match_again() {
         harness.screen()
     );
 }
+
+/// A jump dialog over `count` matching files, with the column right of the
+/// results where a scrollbar would sit and the first result row.
+fn jump_with(count: usize, query: &str) -> (Harness, u16, u16) {
+    let names: Vec<String> = (0..count).map(|i| format!("match-{i:03}.txt")).collect();
+    let paths: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut harness = Harness::launched(
+        std::path::Path::new("/repo"),
+        std::path::Path::new("/repo"),
+        &paths,
+    );
+    harness.press(KeyCode::Char('2'));
+    harness.press(KeyCode::Char('t'));
+    let (bar, top) = bar_column(&harness);
+    type_text(&mut harness, query);
+    (harness, bar, top)
+}
+
+fn bar_column(harness: &Harness) -> (u16, u16) {
+    let (x, y) = harness.at("Jump to file");
+    // The input row's background spans the dialog's full width.
+    let buffer = harness.buffer();
+    let mut right = x;
+    while buffer[(right + 1, y)].bg == buffer[(x - 1, y)].bg {
+        right += 1;
+    }
+    (right, y + 2)
+}
+
+#[test]
+fn results_scrollbar_appears_only_when_results_overflow() {
+    let (harness, bar, top) = jump_with(60, "match");
+    let buffer = harness.buffer();
+    assert_ne!(
+        buffer[(bar, top)].bg,
+        buffer[(bar - 1, top)].bg,
+        "thumb at the top of the track"
+    );
+    let (few, _, _) = jump_with(3, "match");
+    let buffer = few.buffer();
+    assert_eq!(buffer[(bar, top)].bg, buffer[(bar - 1, top)].bg, "no bar");
+}
+
+#[test]
+fn clicking_the_results_scrollbar_track_scrolls() {
+    let (mut harness, bar, top) = jump_with(60, "match");
+    harness.click((bar, top + harness_rows(&harness) - 1));
+    assert!(
+        harness.find("match-000.txt").is_none(),
+        "{}",
+        harness.screen()
+    );
+    assert!(
+        harness.find("match-059.txt").is_some(),
+        "{}",
+        harness.screen()
+    );
+    assert!(
+        harness.line(top - 2).contains("match"),
+        "the dialog stays open"
+    );
+}
+
+fn harness_rows(harness: &Harness) -> u16 {
+    (0..60)
+        .filter(|i| harness.find(&format!("match-{i:03}.txt")).is_some())
+        .count() as u16
+}
+
+#[test]
+fn dragging_the_results_scrollbar_thumb_scrolls_without_choosing() {
+    let (mut harness, bar, top) = jump_with(60, "match");
+    harness.press(KeyCode::Down);
+    let highlight = harness.buffer()[harness.at("match-000.txt")].bg;
+    let last = top + harness_rows(&harness) - 1;
+    harness.mouse_down((bar, top));
+    // Drag past the dialog: the thumb keeps the mouse until release.
+    harness.drag_to((0, last + 10));
+    harness.mouse_up((0, last + 10));
+    assert!(
+        harness.line(top - 2).contains("match"),
+        "no file was chosen"
+    );
+    assert!(
+        harness.find("match-000.txt").is_none(),
+        "{}",
+        harness.screen()
+    );
+    assert!(
+        harness.find("match-059.txt").is_some(),
+        "{}",
+        harness.screen()
+    );
+    // Scroll back: the first result is still the highlighted one.
+    for _ in 0..100 {
+        harness.scroll(MouseEventKind::ScrollUp, (bar - 2, top));
+    }
+    assert_eq!(harness.buffer()[harness.at("match-000.txt")].bg, highlight);
+}
