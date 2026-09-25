@@ -78,8 +78,8 @@ fn files_tree_horizontal_bar_is_a_half_height_bar_on_the_pane() {
     let pane = wide.buffer()[(bar_column(&wide, row) - 1, row)].bg;
     let thumb = &wide.buffer()[(1, bottom)];
     let track = &wide.buffer()[(bar_column(&wide, row), bottom)];
-    assert_eq!(thumb.symbol(), "▀");
-    assert_eq!(track.symbol(), "▀");
+    assert_eq!(thumb.symbol(), "▄");
+    assert_eq!(track.symbol(), "▄");
     assert_ne!(thumb.fg, track.fg);
     assert_eq!(thumb.bg, pane);
     assert_eq!(track.bg, pane);
