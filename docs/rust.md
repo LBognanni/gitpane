@@ -1395,7 +1395,7 @@ rewrite, is among the simpler parts.
 | RS-S0 — Devcontainer environment | Not started | — | Worktree-safe devcontainer with SSH and Claude Code |
 | RS-S1 — Cargo scaffold | Done | RS-S0 | Event loop, tabs, status bar, quality gates |
 | RS-S2 — Git adapter | Done | RS-S1 | `GitApi`, `CliGit`, parsers, adapter tests |
-| RS-S3 — Diff and highlighting | Not started | RS-S2 | Parser, tree-sitter viewport highlighting, documents |
+| RS-S3 — Diff and highlighting | Done | RS-S2 | Parser, tree-sitter viewport highlighting, documents |
 | RS-S4 — CodeView | Not started | RS-S3 | Virtual viewer with wrap, scrollbars, selection |
 | RS-S5 — Application shell | Not started | RS-S4 | Layout, focus, hit map, toasts, modals, shortcuts |
 | RS-S6 — Resizable layout | Not started | RS-S5 | Splitters on both tabs |
