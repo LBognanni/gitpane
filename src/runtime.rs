@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -9,8 +9,9 @@ use std::time::Instant;
 use ratatui::DefaultTerminal;
 
 use crate::app::{Action, App, Effect, Event, Job};
+use crate::document::diff_document;
 use crate::git::{GitApi, GitError};
-use crate::model::FileEntry;
+use crate::model::{DiffEntry, FileEntry};
 use crate::ui;
 
 /// The platform location of the first-launch marker, if one can be determined.
@@ -54,6 +55,18 @@ pub fn run_job(git: &dyn GitApi, job: Job) -> Event {
                 token,
                 result: git.status(&root),
                 failed,
+            }
+        }
+        Job::Diff { root, entry, token } => {
+            let path = match &entry {
+                DiffEntry::File(file) => &file.path,
+                DiffEntry::Commit(file) => &file.path,
+            };
+            Event::Diff {
+                token,
+                result: git
+                    .diff(&root, &entry)
+                    .map(|patch| diff_document(path, &patch)),
             }
         }
     }
@@ -114,10 +127,33 @@ pub fn spawn_git(git: Arc<dyn GitApi>, tx: Sender<Event>) -> Sender<Job> {
     jobs
 }
 
+/// A latest-only worker: skips to the newest queued job before running it.
+fn spawn_latest(git: Arc<dyn GitApi>, tx: Sender<Event>) -> Sender<Job> {
+    let (jobs, rx) = mpsc::channel::<Job>();
+    thread::spawn(move || {
+        while let Ok(job) = rx.recv() {
+            let job = rx.try_iter().last().unwrap_or(job);
+            if tx.send(run_job(git.as_ref(), job)).is_err() {
+                break;
+            }
+        }
+    });
+    jobs
+}
+
+/// Job senders: the FIFO Git queue and the latest-only diff worker.
+struct Workers {
+    git: Sender<Job>,
+    diff: Sender<Job>,
+}
+
 pub fn run(terminal: &mut DefaultTerminal, git: Arc<dyn GitApi>, mut app: App) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_input(tx.clone());
-    let jobs = spawn_git(git, tx);
+    let jobs = Workers {
+        git: spawn_git(git.clone(), tx.clone()),
+        diff: spawn_latest(git, tx),
+    };
     terminal.draw(|frame| ui::render(&mut app, frame))?;
     if execute(app.start(), &jobs) {
         return Ok(());
@@ -144,7 +180,7 @@ pub fn run(terminal: &mut DefaultTerminal, git: Arc<dyn GitApi>, mut app: App) -
 }
 
 /// Applies `first` and every queued event; returns true when the app should quit.
-fn apply(app: &mut App, first: Event, rx: &Receiver<Event>, jobs: &Sender<Job>) -> bool {
+fn apply(app: &mut App, first: Event, rx: &Receiver<Event>, jobs: &Workers) -> bool {
     for event in std::iter::once(first).chain(rx.try_iter()) {
         if execute(app.update(event), jobs) {
             return true;
@@ -156,14 +192,54 @@ fn apply(app: &mut App, first: Event, rx: &Receiver<Event>, jobs: &Sender<Job>) 
 }
 
 /// Executes effects; returns true when one of them is `Quit`.
-fn execute(effects: Vec<Effect>, jobs: &Sender<Job>) -> bool {
+fn execute(effects: Vec<Effect>, jobs: &Workers) -> bool {
     for effect in effects {
         match effect {
             Effect::Quit => return true,
+            Effect::Git(job @ Job::Diff { .. }) => {
+                let _ = jobs.diff.send(job);
+            }
             Effect::Git(job) => {
-                let _ = jobs.send(job);
+                let _ = jobs.git.send(job);
+            }
+            Effect::Copy(text) => {
+                // OSC 52: ask the terminal to set the clipboard.
+                let mut out = io::stdout();
+                let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
+                let _ = out.flush();
             }
         }
     }
     false
+}
+
+/// Standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().fold(0u32, |n, &b| n << 8 | b as u32) << (8 * (3 - chunk.len()));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64;
+
+    #[test]
+    fn base64_encodes_with_padding() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64("sélection".as_bytes()), "c8OpbGVjdGlvbg==");
+    }
 }

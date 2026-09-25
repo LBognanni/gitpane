@@ -2,7 +2,7 @@
 //! synchronously and drawing after every event, like the runtime does.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -56,6 +56,8 @@ pub struct FakeGit {
     pub status: Mutex<Result<RepoState, GitError>>,
     /// When set, every mutation fails with this error.
     pub mutation_error: Mutex<Option<GitError>>,
+    /// Patch text (or error) per path; missing paths have an empty diff.
+    pub diffs: Mutex<HashMap<String, Result<String, GitError>>>,
     pub calls: Mutex<Vec<String>>,
     gate: Option<Gate>,
 }
@@ -65,6 +67,7 @@ impl FakeGit {
         Self {
             status: Mutex::new(status),
             mutation_error: Mutex::new(None),
+            diffs: Mutex::new(HashMap::new()),
             calls: Mutex::new(Vec::new()),
             gate: None,
         }
@@ -97,6 +100,11 @@ impl FakeGit {
         }
     }
 
+    /// Serve `patch` as the diff of `path`.
+    pub fn set_diff(&self, path: &str, patch: Result<String, GitError>) {
+        self.diffs.lock().unwrap().insert(path.to_string(), patch);
+    }
+
     fn mutation(&self, name: &str, paths: &[&str]) -> Result<(), GitError> {
         self.record(format!("{name} {}", paths.join(" ")));
         match self.mutation_error.lock().unwrap().clone() {
@@ -120,8 +128,14 @@ impl GitApi for FakeGit {
     fn commit_files(&self, _: &Path, _: &Commit) -> Result<Vec<CommitFile>, GitError> {
         Ok(Vec::new())
     }
-    fn diff(&self, _: &Path, _: &DiffEntry) -> Result<String, GitError> {
-        Ok(String::new())
+    fn diff(&self, _: &Path, entry: &DiffEntry) -> Result<String, GitError> {
+        let path = match entry {
+            DiffEntry::File(file) => &file.path,
+            DiffEntry::Commit(file) => &file.path,
+        };
+        self.record(format!("diff {path}"));
+        let diffs = self.diffs.lock().unwrap();
+        diffs.get(path).cloned().unwrap_or(Ok(String::new()))
     }
     fn stage(&self, _: &Path, paths: &[&str]) -> Result<(), GitError> {
         self.mutation("stage", paths)
@@ -147,6 +161,8 @@ pub struct Harness {
     /// When true, Git jobs wait in `held` until the test runs them.
     pub hold: bool,
     pub held: VecDeque<Job>,
+    /// Text copied to the clipboard, in order.
+    pub copied: Vec<String>,
     terminal: Terminal<TestBackend>,
 }
 
@@ -184,6 +200,7 @@ impl Harness {
             quit: false,
             hold,
             held: VecDeque::new(),
+            copied: Vec::new(),
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
         };
         harness.draw();
@@ -197,6 +214,7 @@ impl Harness {
         for effect in effects {
             match effect {
                 Effect::Quit => self.quit = true,
+                Effect::Copy(text) => self.copied.push(text),
                 Effect::Git(job) if self.hold => self.held.push_back(job),
                 Effect::Git(job) => {
                     let event = runtime::run_job(&self.git, job);
@@ -257,6 +275,15 @@ impl Harness {
 
     pub fn mouse_down(&mut self, (column, row): (u16, u16)) {
         self.mouse(MouseEventKind::Down(MouseButton::Left), column, row);
+    }
+
+    /// Move the pointer with the left button held.
+    pub fn drag_to(&mut self, (column, row): (u16, u16)) {
+        self.mouse(MouseEventKind::Drag(MouseButton::Left), column, row);
+    }
+
+    pub fn scroll(&mut self, kind: MouseEventKind, (column, row): (u16, u16)) {
+        self.mouse(kind, column, row);
     }
 
     pub fn mouse_up(&mut self, (column, row): (u16, u16)) {
