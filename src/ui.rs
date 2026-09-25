@@ -7,11 +7,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wi
 
 use crate::app::{App, Button, Focus, Modal, Severity, Tab, Target};
 use crate::code_view::CodeView;
+use crate::layout::{Group, Splitter};
 use crate::model::FileEntry;
 use crate::theme;
 
-/// Fixed sidebar and Files tree width until resizing lands (RS-S6).
-const SIDEBAR_WIDTH: u16 = 30;
 const TOAST_WIDTH: u16 = 50;
 const SHORTCUTS_WIDTH: u16 = 60;
 
@@ -96,28 +95,58 @@ fn render_tabs(app: &mut App, area: Rect, buf: &mut Buffer) {
     }
 }
 
-fn split_columns(area: Rect) -> [Rect; 3] {
-    Layout::horizontal([
-        Constraint::Length(SIDEBAR_WIDTH),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(area)
+/// Split `area` along one axis into the group's panes with one-cell splitters between.
+fn split(group: &mut Group, area: Rect, vertical: bool) -> Vec<Rect> {
+    let sizes = group.layout(if vertical { area.height } else { area.width });
+    let mut constraints = Vec::new();
+    for (index, size) in sizes.into_iter().enumerate() {
+        if index > 0 {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Length(size));
+    }
+    let layout = if vertical {
+        Layout::vertical(constraints)
+    } else {
+        Layout::horizontal(constraints)
+    };
+    layout.split(area).to_vec()
+}
+
+fn split_columns(group: &mut Group, area: Rect) -> [Rect; 3] {
+    split(group, area, false)
+        .try_into()
+        .expect("two panes and a splitter")
+}
+
+/// Draw a splitter: `│` down a vertical one, `─` across a horizontal one.
+fn splitter(app: &mut App, splitter: Splitter, area: Rect, buf: &mut Buffer) {
+    let active = app.hover == Some(Target::Splitter(splitter))
+        || app.drag.is_some_and(|drag| drag.splitter == splitter);
+    let (symbol, color) = (
+        match splitter {
+            Splitter::Section(_) => "─",
+            Splitter::Sidebar | Splitter::Files => "│",
+        },
+        if active { theme::ACCENT } else { theme::BORDER },
+    );
+    for position in area.positions() {
+        buf[position]
+            .set_symbol(symbol)
+            .set_fg(color)
+            .set_bg(theme::CANVAS);
+    }
+    app.hits.push((area, Target::Splitter(splitter)));
 }
 
 fn render_changes(app: &mut App, area: Rect, buf: &mut Buffer) {
-    let [sidebar, splitter, pane] = split_columns(area);
-    vertical_splitter(splitter, buf);
-    let [staged, split1, unstaged, split2, commits] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(sidebar);
-    horizontal_splitter(split1, buf);
-    horizontal_splitter(split2, buf);
+    let [sidebar, divider, pane] = split_columns(&mut app.panes.changes, area);
+    splitter(app, Splitter::Sidebar, divider, buf);
+    let [staged, split1, unstaged, split2, commits] = split(&mut app.panes.sections, sidebar, true)
+        .try_into()
+        .expect("three sections and two splitters");
+    splitter(app, Splitter::Section(0), split1, buf);
+    splitter(app, Splitter::Section(1), split2, buf);
 
     let staged_rows = status_rows(&app.staged, app.status_loading);
     let unstaged_rows = status_rows(&app.unstaged, app.status_loading);
@@ -145,8 +174,8 @@ fn render_changes(app: &mut App, area: Rect, buf: &mut Buffer) {
 }
 
 fn render_files(app: &mut App, area: Rect, buf: &mut Buffer) {
-    let [tree, splitter, pane] = split_columns(area);
-    vertical_splitter(splitter, buf);
+    let [tree, divider, pane] = split_columns(&mut app.panes.files, area);
+    splitter(app, Splitter::Files, divider, buf);
     bordered_list(app.focus == Focus::FilesTree, Vec::new(), tree, buf);
     app.hits.push((tree, Target::Pane(Focus::FilesTree)));
 
@@ -239,24 +268,6 @@ fn render_view(view: &mut CodeView, area: Rect, buf: &mut Buffer) {
         if cell.bg == Color::Reset {
             cell.bg = theme::DIFF_BACKGROUND;
         }
-    }
-}
-
-fn vertical_splitter(area: Rect, buf: &mut Buffer) {
-    for position in area.positions() {
-        buf[position]
-            .set_symbol("│")
-            .set_fg(theme::BORDER)
-            .set_bg(theme::CANVAS);
-    }
-}
-
-fn horizontal_splitter(area: Rect, buf: &mut Buffer) {
-    for position in area.positions() {
-        buf[position]
-            .set_symbol("─")
-            .set_fg(theme::BORDER)
-            .set_bg(theme::CANVAS);
     }
 }
 
