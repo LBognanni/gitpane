@@ -1393,7 +1393,7 @@ rewrite, is among the simpler parts.
 | Story | Status | Depends on | Primary deliverable |
 | --- | --- | --- | --- |
 | RS-S0 — Devcontainer environment | Not started | — | Worktree-safe devcontainer with SSH and Claude Code |
-| RS-S1 — Cargo scaffold | Not started | RS-S0 | Event loop, tabs, status bar, quality gates |
+| RS-S1 — Cargo scaffold | Done | RS-S0 | Event loop, tabs, status bar, quality gates |
 | RS-S2 — Git adapter | Not started | RS-S1 | `GitApi`, `CliGit`, parsers, adapter tests |
 | RS-S3 — Diff and highlighting | Not started | RS-S2 | Parser, tree-sitter viewport highlighting, documents |
 | RS-S4 — CodeView | Not started | RS-S3 | Virtual viewer with wrap, scrollbars, selection |
