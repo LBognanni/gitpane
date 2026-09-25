@@ -5,14 +5,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget};
 
-use crate::app::{App, Button, Focus, Modal, Severity, Tab, Target};
+use crate::app::{Action, App, Button, Focus, Modal, Severity, Tab, Target};
 use crate::code_view::CodeView;
 use crate::layout::{Group, Splitter};
-use crate::model::FileEntry;
+use crate::model::Side;
 use crate::theme;
 
 const TOAST_WIDTH: u16 = 50;
 const SHORTCUTS_WIDTH: u16 = 60;
+const DISCARD_WIDTH: u16 = 60;
 
 pub const SHORTCUTS: &str = "Mouse controls are supported throughout.
 
@@ -60,10 +61,16 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .block(Block::new().padding(Padding::horizontal(1)))
         .render(status, buf);
 
-    if app.modal == Some(Modal::Shortcuts) {
+    if let Some(modal) = app.modal.clone() {
         dim(area, buf);
         app.hits.push((area, Target::Backdrop));
-        render_shortcuts(app, area, buf);
+        match modal {
+            Modal::Shortcuts => render_shortcuts(app, area, buf),
+            Modal::Discard { entries, confirm } => {
+                let untracked = entries.iter().any(|entry| entry.status == '?');
+                render_discard(app, area, entries.len(), untracked, confirm, buf);
+            }
+        }
     }
     render_toasts(
         app,
@@ -148,18 +155,13 @@ fn render_changes(app: &mut App, area: Rect, buf: &mut Buffer) {
     splitter(app, Splitter::Section(0), split1, buf);
     splitter(app, Splitter::Section(1), split2, buf);
 
-    let staged_rows = status_rows(&app.staged, app.status_loading);
-    let unstaged_rows = status_rows(&app.unstaged, app.status_loading);
-    section(app, staged, "Staged", Focus::Staged, staged_rows, buf);
-    section(
-        app,
-        unstaged,
-        "Unstaged",
-        Focus::Unstaged,
-        unstaged_rows,
-        buf,
-    );
-    section(app, commits, "Commits", Focus::Commits, Vec::new(), buf);
+    status_section(app, staged, Side::Staged, buf);
+    status_section(app, unstaged, Side::Unstaged, buf);
+    let [title, list] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(commits);
+    viewer_title(app, title, "Commits", &[], buf);
+    bordered_list(app.focus == Focus::Commits, Vec::new(), list, buf);
+    app.hits.push((list, Target::Pane(Focus::Commits)));
 
     let [title, view] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(pane);
     viewer_title(
@@ -185,40 +187,163 @@ fn render_files(app: &mut App, area: Rect, buf: &mut Buffer) {
     app.hits.push((view, Target::Pane(Focus::Preview)));
 }
 
-fn status_rows(entries: &[FileEntry], loading: bool) -> Vec<Line<'static>> {
-    if loading {
-        return vec![loading_line()];
-    }
-    entries
-        .iter()
-        .map(|entry| {
-            Line::from(match &entry.unsupported_reason {
-                Some(reason) => format!("[!] {} {} - {reason}", entry.status, entry.path),
-                None => format!("[ ] {} {}", entry.status, entry.path),
-            })
-        })
-        .collect()
-}
-
 fn loading_line() -> Line<'static> {
     Line::styled("Loading…", Style::new().add_modifier(Modifier::DIM))
 }
 
-fn section(
-    app: &mut App,
-    area: Rect,
-    title: &str,
-    focus: Focus,
-    rows: Vec<Line<'static>>,
-    buf: &mut Buffer,
-) {
+/// A status section: title bar with bulk actions, then the bordered list.
+fn status_section(app: &mut App, area: Rect, side: Side, buf: &mut Buffer) {
+    let (title, focus, bulk): (_, _, &[Button]) = match side {
+        Side::Staged => ("Staged", Focus::Staged, &[Button::Bulk(Action::Unstage)]),
+        Side::Unstaged => (
+            "Unstaged",
+            Focus::Unstaged,
+            &[Button::Bulk(Action::Stage), Button::Bulk(Action::Discard)],
+        ),
+    };
     let [title_row, list] =
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
-    Paragraph::new(format!(" {title}"))
-        .style(theme::title())
-        .render(title_row, buf);
-    bordered_list(app.focus == focus, rows, list, buf);
+    let buttons = if app.list(side).any_checked() {
+        bulk
+    } else {
+        &[]
+    };
+    viewer_title(app, title_row, title, buttons, buf);
+    let focused = app.focus == focus;
+    let loading = app.status_loading;
+    bordered_list(
+        focused,
+        loading.then(loading_line).into_iter().collect(),
+        list,
+        buf,
+    );
     app.hits.push((list, Target::Pane(focus)));
+    if !loading {
+        status_rows(
+            app,
+            side,
+            focused,
+            list.inner(ratatui::layout::Margin::new(1, 1)),
+            buf,
+        );
+    }
+}
+
+/// Draw the visible rows of a status list with their states and row actions.
+fn status_rows(app: &mut App, side: Side, focused: bool, area: Rect, buf: &mut Buffer) {
+    let height = area.height as usize;
+    let list = match side {
+        Side::Staged => &mut app.staged,
+        Side::Unstaged => &mut app.unstaged,
+    };
+    if let Some(index) = list.highlight {
+        list.offset = list
+            .offset
+            .min(index)
+            .max((index + 1).saturating_sub(height));
+    }
+    let offset = list.offset;
+    let hover = app.hover;
+    let list = app.list(side);
+    let mut hits = Vec::new();
+    for (index, entry) in list.entries.iter().enumerate().skip(offset).take(height) {
+        let rect = Rect {
+            y: area.y + (index - offset) as u16,
+            height: 1,
+            ..area
+        };
+        let highlighted = list.highlight == Some(index);
+        let hovered = matches!(
+            hover,
+            Some(Target::Row(s, i) | Target::Checkbox(s, i) | Target::Button(Button::Row(s, i, _)))
+                if s == side && i == index
+        );
+        let style = if highlighted && focused {
+            Style::new()
+                .fg(theme::TEXT)
+                .bg(theme::FOCUSED_SELECTION)
+                .add_modifier(Modifier::BOLD)
+        } else if highlighted {
+            Style::new().fg(theme::TEXT).bg(theme::INACTIVE_SELECTION)
+        } else if hovered {
+            Style::new().fg(theme::TEXT).bg(theme::RAISED_SURFACE)
+        } else {
+            Style::new().fg(theme::TEXT).bg(theme::SURFACE)
+        };
+        let label = match &entry.unsupported_reason {
+            Some(reason) => format!("[!] {} {} - {reason}", entry.status, entry.path),
+            None => {
+                let mark = if list.checked[index] { 'x' } else { ' ' };
+                format!("[{mark}] {} {}", entry.status, entry.path)
+            }
+        };
+        buf.set_style(rect, style);
+        Span::styled(label, style).render(rect, buf);
+        hits.push((rect, Target::Row(side, index)));
+        if entry.unsupported_reason.is_some() {
+            continue;
+        }
+        hits.push((
+            Rect {
+                width: 3.min(rect.width),
+                ..rect
+            },
+            Target::Checkbox(side, index),
+        ));
+        if !(hovered || highlighted && focused) {
+            continue;
+        }
+        let actions: &[Action] = match side {
+            Side::Staged => &[Action::Unstage],
+            Side::Unstaged => &[Action::Stage, Action::Discard],
+        };
+        let mut x = rect
+            .right()
+            .saturating_sub(3 * actions.len() as u16)
+            .max(rect.x);
+        for &action in actions {
+            let button = Button::Row(side, index, action);
+            let cell = Rect {
+                x,
+                width: 3.min(rect.right() - x),
+                ..rect
+            };
+            let hovered_button = hover == Some(Target::Button(button));
+            Span::styled(glyph(button), button_style(button, hovered_button, style))
+                .render(cell, buf);
+            hits.push((cell, Target::Button(button)));
+            x += cell.width;
+        }
+    }
+    app.hits.extend(hits);
+}
+
+/// The three-cell label of an icon button.
+fn glyph(button: Button) -> &'static str {
+    match button {
+        Button::PreviousChange => " ↑ ",
+        Button::NextChange => " ↓ ",
+        Button::Row(_, _, action) | Button::Bulk(action) => match action {
+            Action::Stage => " ↑ ",
+            Action::Unstage => " ↓ ",
+            Action::Discard => " ↶ ",
+        },
+    }
+}
+
+/// A button's style on `base`: raised and bold while hovered, danger for discard.
+fn button_style(button: Button, hovered: bool, base: Style) -> Style {
+    if !hovered {
+        return base.fg(theme::TEXT);
+    }
+    let discard = matches!(
+        button,
+        Button::Row(_, _, Action::Discard) | Button::Bulk(Action::Discard)
+    );
+    Style::new()
+        .fg(if discard { theme::DANGER } else { theme::TEXT })
+        .bg(theme::RAISED_SURFACE)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn bordered_list(focused: bool, rows: Vec<Line<'static>>, area: Rect, buf: &mut Buffer) {
@@ -244,13 +369,18 @@ fn viewer_title(app: &mut App, area: Rect, label: &str, buttons: &[Button], buf:
             width: 3.min(rest.width),
             ..rest
         };
-        let glyph = match button {
-            Button::PreviousChange => " ↑ ",
-            Button::NextChange => " ↓ ",
+        let style = match button {
+            // Change buttons stay disabled until the diff pane story (RS-S8).
+            Button::PreviousChange | Button::NextChange => {
+                theme::title().add_modifier(Modifier::DIM)
+            }
+            _ => button_style(
+                button,
+                app.hover == Some(Target::Button(button)),
+                theme::title(),
+            ),
         };
-        // Change buttons stay disabled until the diff pane story (RS-S8).
-        let style = theme::title().add_modifier(Modifier::DIM);
-        Span::styled(glyph, style).render(rect, buf);
+        Span::styled(glyph(button), style).render(rect, buf);
         app.hits.push((rect, Target::Button(button)));
         rest.x += rect.width;
         rest.width -= rect.width;
@@ -341,6 +471,76 @@ fn render_shortcuts(app: &mut App, area: Rect, buf: &mut Buffer) {
     )
     .render(close, buf);
     app.hits.push((close, Target::CloseShortcuts));
+}
+
+fn render_discard(
+    app: &mut App,
+    area: Rect,
+    count: usize,
+    untracked: bool,
+    confirm: bool,
+    buf: &mut Buffer,
+) {
+    let noun = if count == 1 { "file" } else { "files" };
+    let mut message = format!("Discard changes to {count} {noun}? This cannot be undone.");
+    if untracked {
+        message.push_str(" Untracked files will be permanently deleted.");
+    }
+    let width = DISCARD_WIDTH.min(area.width * 9 / 10);
+    let text = wrap(&message, width.saturating_sub(6) as usize);
+    // Border, padding, title, the message with its margins, and the buttons.
+    let dialog = centered(area, width, text.len() as u16 + 8);
+    Clear.render(dialog, buf);
+    let block = Block::bordered()
+        .border_style(Style::new().fg(theme::BORDER))
+        .style(Style::new().fg(theme::TEXT).bg(theme::RAISED_SURFACE))
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(dialog);
+    block.render(dialog, buf);
+    let [body, buttons] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let mut lines = vec![
+        Line::styled(
+            "Discard Changes?",
+            Style::new().add_modifier(Modifier::BOLD),
+        ),
+        Line::default(),
+    ];
+    lines.extend(text.into_iter().map(Line::from));
+    Paragraph::new(lines).render(body, buf);
+    // Right-aligned: ` Cancel `, a gap, then ` Discard `.
+    let [_, cancel, _, discard] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(8),
+        Constraint::Length(1),
+        Constraint::Length(9),
+    ])
+    .areas(buttons);
+    let focused = |on: bool| {
+        if on {
+            Modifier::BOLD | Modifier::REVERSED
+        } else {
+            Modifier::empty()
+        }
+    };
+    Span::styled(
+        " Cancel ",
+        Style::new()
+            .fg(theme::TEXT)
+            .bg(theme::INACTIVE_SELECTION)
+            .add_modifier(focused(!confirm)),
+    )
+    .render(cancel, buf);
+    Span::styled(
+        " Discard ",
+        Style::new()
+            .fg(theme::CANVAS)
+            .bg(theme::DANGER)
+            .add_modifier(focused(confirm)),
+    )
+    .render(discard, buf);
+    app.hits.push((cancel, Target::CancelDiscard));
+    app.hits.push((discard, Target::ConfirmDiscard));
 }
 
 /// Word-wrap `text` to `width` columns, splitting words longer than a line.

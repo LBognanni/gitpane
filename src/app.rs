@@ -8,9 +8,10 @@ use crossterm::event::{
 use ratatui::layout::{Position, Rect};
 
 use crate::code_view::CodeView;
+use crate::document::Document;
 use crate::git::GitError;
 use crate::layout::{Panes, Splitter};
-use crate::model::{FileEntry, RepoState};
+use crate::model::{FileEntry, RepoState, Side};
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 
@@ -43,11 +44,42 @@ impl Focus {
 const CHANGES_ORDER: [Focus; 4] = [Focus::Staged, Focus::Unstaged, Focus::Commits, Focus::Diff];
 const FILES_ORDER: [Focus; 2] = [Focus::FilesTree, Focus::Preview];
 
+/// A Git mutation on status entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Stage,
+    Unstage,
+    Discard,
+}
+
+impl Action {
+    /// The action as named in `Could not <action>`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stage => "stage",
+            Self::Unstage => "unstage",
+            Self::Discard => "discard changes",
+        }
+    }
+
+    /// The row action that moves an entry off `side`.
+    fn toggle(side: Side) -> Self {
+        match side {
+            Side::Staged => Self::Unstage,
+            Side::Unstaged => Self::Stage,
+        }
+    }
+}
+
 /// An icon button; see section 10.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     PreviousChange,
     NextChange,
+    /// A row action on one entry of a status list.
+    Row(Side, usize, Action),
+    /// A title-bar action on the checked entries of a status list.
+    Bulk(Action),
 }
 
 impl Button {
@@ -55,6 +87,12 @@ impl Button {
         match self {
             Self::PreviousChange => "Previous Change",
             Self::NextChange => "Next Change",
+            Self::Row(_, _, Action::Stage) => "Stage Changes",
+            Self::Row(_, _, Action::Unstage) => "Unstage Changes",
+            Self::Row(_, _, Action::Discard) => "Discard Changes",
+            Self::Bulk(Action::Stage) => "Stage Selected Changes",
+            Self::Bulk(Action::Unstage) => "Unstage Selected Changes",
+            Self::Bulk(Action::Discard) => "Discard Selected Changes",
         }
     }
 }
@@ -65,16 +103,86 @@ pub enum Target {
     Tab(Tab),
     Pane(Focus),
     Button(Button),
+    /// A status list row.
+    Row(Side, usize),
+    /// The `[ ]` columns of a supported status list row.
+    Checkbox(Side, usize),
     /// The dimmed area behind a modal; swallows input.
     Backdrop,
     CloseShortcuts,
+    CancelDiscard,
+    ConfirmDiscard,
     Toast(u64),
     Splitter(Splitter),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     Shortcuts,
+    /// Discard confirmation for `entries`; `confirm` is true when Discard has focus.
+    Discard {
+        entries: Vec<FileEntry>,
+        confirm: bool,
+    },
+}
+
+/// A status list: its entries, checkboxes, and highlighted row.
+#[derive(Debug, Default)]
+pub struct StatusList {
+    pub entries: Vec<FileEntry>,
+    pub checked: Vec<bool>,
+    pub highlight: Option<usize>,
+    /// First visible row, kept by `ui::render` so the highlight stays visible.
+    pub offset: usize,
+}
+
+impl StatusList {
+    fn new(entries: Vec<FileEntry>) -> Self {
+        Self {
+            checked: vec![false; entries.len()],
+            entries,
+            highlight: None,
+            offset: 0,
+        }
+    }
+
+    pub fn any_checked(&self) -> bool {
+        self.checked.contains(&true)
+    }
+
+    fn checked_entries(&self) -> Vec<FileEntry> {
+        self.entries
+            .iter()
+            .zip(&self.checked)
+            .filter(|(_, checked)| **checked)
+            .map(|(entry, _)| entry.clone())
+            .collect()
+    }
+
+    fn toggle(&mut self, index: usize) {
+        if self
+            .entries
+            .get(index)
+            .is_some_and(|e| e.unsupported_reason.is_none())
+        {
+            self.checked[index] = !self.checked[index];
+        }
+    }
+
+    fn highlighted(&self) -> Option<&FileEntry> {
+        self.highlight.and_then(|index| self.entries.get(index))
+    }
+
+    fn step(&mut self, down: bool) {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            return;
+        };
+        self.highlight = Some(match (self.highlight, down) {
+            (None, _) => 0,
+            (Some(index), true) => (index + 1).min(last),
+            (Some(index), false) => index.saturating_sub(1),
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +204,17 @@ pub struct Toast {
 /// Work executed off the UI thread by the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    Status(PathBuf),
+    Status {
+        root: PathBuf,
+        token: u64,
+    },
+    /// Run `action` on `entries`, then read status, in one job.
+    Mutate {
+        root: PathBuf,
+        action: Action,
+        entries: Vec<FileEntry>,
+        token: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -104,7 +222,12 @@ pub enum Event {
     Input(Input),
     /// The clock reached `Instant`; expires toasts.
     Tick(Instant),
-    Status(Result<RepoState, GitError>),
+    /// A status read for request `token`, and the mutation that preceded it, if it failed.
+    Status {
+        token: u64,
+        result: Result<RepoState, GitError>,
+        failed: Option<(Action, GitError)>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -128,9 +251,12 @@ pub struct App {
     pub tab: Tab,
     pub focus: Focus,
     pub branch: String,
-    pub staged: Vec<FileEntry>,
-    pub unstaged: Vec<FileEntry>,
+    pub staged: StatusList,
+    pub unstaged: StatusList,
     pub status_loading: bool,
+    status_token: u64,
+    /// The entry whose diff was last requested.
+    pub selection: Option<FileEntry>,
     pub modal: Option<Modal>,
     pub toasts: Vec<Toast>,
     next_toast: u64,
@@ -153,9 +279,11 @@ impl App {
             tab: Tab::Changes,
             focus: Focus::Staged,
             branch: String::new(),
-            staged: Vec::new(),
-            unstaged: Vec::new(),
+            staged: StatusList::default(),
+            unstaged: StatusList::default(),
             status_loading: true,
+            status_token: 0,
+            selection: None,
             modal: show_shortcuts.then_some(Modal::Shortcuts),
             toasts: Vec::new(),
             next_toast: 0,
@@ -171,8 +299,90 @@ impl App {
     }
 
     /// Effects to run once at startup.
-    pub fn start(&self) -> Vec<Effect> {
-        vec![Effect::Git(Job::Status(self.root.clone()))]
+    pub fn start(&mut self) -> Vec<Effect> {
+        self.refresh_status()
+    }
+
+    pub fn list(&self, side: Side) -> &StatusList {
+        match side {
+            Side::Staged => &self.staged,
+            Side::Unstaged => &self.unstaged,
+        }
+    }
+
+    fn list_mut(&mut self, side: Side) -> &mut StatusList {
+        match side {
+            Side::Staged => &mut self.staged,
+            Side::Unstaged => &mut self.unstaged,
+        }
+    }
+
+    /// The side of the focused status list, if one has focus.
+    fn focused_side(&self) -> Option<Side> {
+        match self.focus {
+            Focus::Staged => Some(Side::Staged),
+            Focus::Unstaged => Some(Side::Unstaged),
+            _ => None,
+        }
+    }
+
+    /// Start a manual status refresh and return the token of its request.
+    fn start_status_refresh(&mut self) -> u64 {
+        self.status_token += 1;
+        self.status_loading = true;
+        self.status_token
+    }
+
+    fn refresh_status(&mut self) -> Vec<Effect> {
+        let token = self.start_status_refresh();
+        vec![Effect::Git(Job::Status {
+            root: self.root.clone(),
+            token,
+        })]
+    }
+
+    /// Queue `action` on the supported `entries` as one job.
+    fn mutate(&mut self, action: Action, entries: Vec<FileEntry>) -> Vec<Effect> {
+        let entries: Vec<FileEntry> = entries
+            .into_iter()
+            .filter(|entry| entry.unsupported_reason.is_none())
+            .collect();
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        let token = self.start_status_refresh();
+        vec![Effect::Git(Job::Mutate {
+            root: self.root.clone(),
+            action,
+            entries,
+            token,
+        })]
+    }
+
+    /// Stage or unstage directly; ask before discarding.
+    fn request(&mut self, action: Action, entries: Vec<FileEntry>) -> Vec<Effect> {
+        if action != Action::Discard {
+            return self.mutate(action, entries);
+        }
+        let entries: Vec<FileEntry> = entries
+            .into_iter()
+            .filter(|entry| entry.unsupported_reason.is_none())
+            .collect();
+        if !entries.is_empty() {
+            self.modal = Some(Modal::Discard {
+                entries,
+                confirm: false,
+            });
+        }
+        Vec::new()
+    }
+
+    /// Select `entry` for the diff pane.
+    fn select(&mut self, entry: FileEntry) {
+        self.diff_title = entry.path.clone();
+        let message = entry.unsupported_reason.as_deref().unwrap_or("");
+        self.diff_view.set_document(Document::message(message));
+        self.selection = Some(entry);
     }
 
     /// The hint for the hovered button, if any.
@@ -210,9 +420,9 @@ impl App {
     }
 
     pub fn update(&mut self, event: Event) -> Vec<Effect> {
-        let before = (self.tab, self.modal);
+        let before = (self.tab, self.modal.clone());
         let effects = self.handle(event);
-        if (self.tab, self.modal) != before {
+        if (self.tab, self.modal.clone()) != before {
             self.hover = None;
         }
         effects
@@ -223,13 +433,26 @@ impl App {
             Event::Input(Input::Key(key)) if key.kind != KeyEventKind::Release => {
                 return self.key(key);
             }
-            Event::Input(Input::Mouse(mouse)) => self.mouse(mouse),
+            Event::Input(Input::Mouse(mouse)) => return self.mouse(mouse),
             Event::Input(_) => {}
             Event::Tick(now) => self.expire_due(now),
-            Event::Status(result) => {
+            Event::Status {
+                token,
+                result,
+                failed,
+            } => {
+                if let Some((action, error)) = failed {
+                    self.git_error(action.name(), &error);
+                }
+                if token != self.status_token {
+                    return Vec::new();
+                }
                 self.status_loading = false;
                 match result {
-                    Ok(state) => self.apply_status(state),
+                    Ok(state) => {
+                        self.apply_status(state);
+                        self.focus_first_entry();
+                    }
                     Err(error) => self.git_error("refresh status", &error),
                 }
             }
@@ -237,19 +460,35 @@ impl App {
         Vec::new()
     }
 
+    /// Rebuild both lists, invalidate the diff pane, and update the branch.
     fn apply_status(&mut self, state: RepoState) {
         self.branch = state.branch;
-        self.staged = state.staged;
-        self.unstaged = state.unstaged;
-        if self.tab == Tab::Changes && !(self.staged.is_empty() && self.unstaged.is_empty()) {
-            self.focus = self.first_changes_pane();
+        self.staged = StatusList::new(state.staged);
+        self.unstaged = StatusList::new(state.unstaged);
+        self.selection = None;
+        self.diff_title.clear();
+        self.diff_view.set_document(Document::message(""));
+    }
+
+    /// Highlight and focus the first entry, Staged before Unstaged (manual loads only).
+    fn focus_first_entry(&mut self) {
+        let focus = self.first_changes_pane();
+        if let Some(side) = match focus {
+            Focus::Staged => Some(Side::Staged),
+            Focus::Unstaged => Some(Side::Unstaged),
+            _ => None,
+        } {
+            self.list_mut(side).highlight = Some(0);
+            if self.tab == Tab::Changes {
+                self.focus = focus;
+            }
         }
     }
 
     fn first_changes_pane(&self) -> Focus {
-        if !self.staged.is_empty() {
+        if !self.staged.entries.is_empty() {
             Focus::Staged
-        } else if !self.unstaged.is_empty() {
+        } else if !self.unstaged.entries.is_empty() {
             Focus::Unstaged
         } else {
             Focus::Commits
@@ -278,14 +517,60 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return vec![Effect::Quit];
         }
-        if let Some(Modal::Shortcuts) = self.modal {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('h')) {
-                self.modal = None;
+        match &mut self.modal {
+            Some(Modal::Shortcuts) => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('h')) {
+                    self.modal = None;
+                }
+                return Vec::new();
             }
-            return Vec::new();
+            Some(Modal::Discard { confirm, .. }) => {
+                match key.code {
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                        *confirm = !*confirm;
+                    }
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Enter => {
+                        let confirmed = *confirm;
+                        return self.close_discard(confirmed);
+                    }
+                    _ => {}
+                }
+                return Vec::new();
+            }
+            None => {}
+        }
+        if let Some(side) = self.focused_side() {
+            let list = self.list_mut(side);
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => list.step(true),
+                KeyCode::Up | KeyCode::Char('k') => list.step(false),
+                KeyCode::Char(' ') => {
+                    if let Some(index) = list.highlight {
+                        list.toggle(index);
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(entry) = list.highlighted().cloned() {
+                        self.select(entry);
+                    }
+                }
+                KeyCode::Char('s') => {
+                    if let Some(entry) = list.highlighted().cloned() {
+                        return self.mutate(Action::toggle(side), vec![entry]);
+                    }
+                }
+                KeyCode::Char('d') if side == Side::Unstaged => {
+                    if let Some(entry) = list.highlighted().cloned() {
+                        return self.request(Action::Discard, vec![entry]);
+                    }
+                }
+                _ => {}
+            }
         }
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
+            KeyCode::Char('r') => return self.refresh_status(),
             KeyCode::Char('h') => self.modal = Some(Modal::Shortcuts),
             KeyCode::Char('1') => self.show_tab(Tab::Changes),
             KeyCode::Char('2') => self.show_tab(Tab::Files),
@@ -296,7 +581,44 @@ impl App {
         Vec::new()
     }
 
-    fn mouse(&mut self, mouse: MouseEvent) {
+    /// Close the discard dialog, discarding its entries when `confirmed`.
+    fn close_discard(&mut self, confirmed: bool) -> Vec<Effect> {
+        match self.modal.take() {
+            Some(Modal::Discard { entries, .. }) if confirmed => {
+                self.mutate(Action::Discard, entries)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn press_button(&mut self, button: Button) -> Vec<Effect> {
+        match button {
+            Button::Row(side, index, action) => match self.list(side).entries.get(index) {
+                Some(entry) => self.request(action, vec![entry.clone()]),
+                None => Vec::new(),
+            },
+            Button::Bulk(action) => {
+                let side = match action {
+                    Action::Unstage => Side::Staged,
+                    Action::Stage | Action::Discard => Side::Unstaged,
+                };
+                let entries = self.list(side).checked_entries();
+                self.request(action, entries)
+            }
+            // Change buttons stay disabled until the diff pane story.
+            Button::PreviousChange | Button::NextChange => Vec::new(),
+        }
+    }
+
+    fn focus_list(&mut self, side: Side) {
+        self.tab = Tab::Changes;
+        self.focus = match side {
+            Side::Staged => Focus::Staged,
+            Side::Unstaged => Focus::Unstaged,
+        };
+    }
+
+    fn mouse(&mut self, mouse: MouseEvent) -> Vec<Effect> {
         // A drag captures the mouse until the button is released.
         if let Some(drag) = self.drag {
             match mouse.kind {
@@ -308,7 +630,7 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return Vec::new();
         }
         let target = self.hit(Position::new(mouse.column, mouse.row));
         match mouse.kind {
@@ -320,6 +642,20 @@ impl App {
                     self.focus = focus;
                 }
                 Some(Target::CloseShortcuts) => self.modal = None,
+                Some(Target::CancelDiscard) => return self.close_discard(false),
+                Some(Target::ConfirmDiscard) => return self.close_discard(true),
+                Some(Target::Row(side, index)) => {
+                    self.focus_list(side);
+                    self.list_mut(side).highlight = Some(index);
+                    if let Some(entry) = self.list(side).entries.get(index).cloned() {
+                        self.select(entry);
+                    }
+                }
+                Some(Target::Checkbox(side, index)) => {
+                    self.focus_list(side);
+                    self.list_mut(side).toggle(index);
+                }
+                Some(Target::Button(button)) => return self.press_button(button),
                 Some(Target::Toast(id)) => self.toasts.retain(|toast| toast.id != id),
                 Some(Target::Splitter(splitter)) => {
                     let start = axis(splitter, mouse);
@@ -331,11 +667,11 @@ impl App {
                         sizes,
                     });
                 }
-                // Change buttons stay disabled until the diff pane story.
-                Some(Target::Button(_) | Target::Backdrop) | None => {}
+                Some(Target::Backdrop) | None => {}
             },
             _ => {}
         }
+        Vec::new()
     }
 
     fn hit(&self, position: Position) -> Option<Target> {

@@ -8,8 +8,9 @@ use std::time::Instant;
 
 use ratatui::DefaultTerminal;
 
-use crate::app::{App, Effect, Event, Job};
-use crate::git::GitApi;
+use crate::app::{Action, App, Effect, Event, Job};
+use crate::git::{GitApi, GitError};
+use crate::model::FileEntry;
 use crate::ui;
 
 /// The platform location of the first-launch marker, if one can be determined.
@@ -35,7 +36,57 @@ pub fn claim_first_launch(marker: &Path) -> bool {
 /// Run one background job to completion and return its result event.
 pub fn run_job(git: &dyn GitApi, job: Job) -> Event {
     match job {
-        Job::Status(root) => Event::Status(git.status(&root)),
+        Job::Status { root, token } => Event::Status {
+            token,
+            result: git.status(&root),
+            failed: None,
+        },
+        Job::Mutate {
+            root,
+            action,
+            entries,
+            token,
+        } => {
+            let failed = mutate(git, &root, action, &entries)
+                .err()
+                .map(|error| (action, error));
+            Event::Status {
+                token,
+                result: git.status(&root),
+                failed,
+            }
+        }
+    }
+}
+
+/// Apply `action`; discard restores tracked entries and cleans untracked ones.
+fn mutate(
+    git: &dyn GitApi,
+    root: &Path,
+    action: Action,
+    entries: &[FileEntry],
+) -> Result<(), GitError> {
+    let paths = |keep: fn(&FileEntry) -> bool| -> Vec<&str> {
+        entries
+            .iter()
+            .filter(|entry| keep(entry))
+            .map(|entry| entry.path.as_str())
+            .collect()
+    };
+    match action {
+        Action::Stage => git.stage(root, &paths(|_| true)),
+        Action::Unstage => git.unstage(root, &paths(|_| true)),
+        Action::Discard => {
+            let tracked = paths(|entry| entry.status != '?');
+            let untracked = paths(|entry| entry.status == '?');
+            if !tracked.is_empty() {
+                git.restore(root, &tracked)?;
+            }
+            if !untracked.is_empty() {
+                git.clean(root, &untracked)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -50,8 +101,8 @@ fn spawn_input(tx: Sender<Event>) {
     });
 }
 
-/// The FIFO Git queue: runs jobs in order and posts their results.
-fn spawn_git(git: Arc<dyn GitApi>, tx: Sender<Event>) -> Sender<Job> {
+/// The FIFO Git queue: runs jobs in order on one thread and posts their results.
+pub fn spawn_git(git: Arc<dyn GitApi>, tx: Sender<Event>) -> Sender<Job> {
     let (jobs, rx) = mpsc::channel::<Job>();
     thread::spawn(move || {
         for job in rx {

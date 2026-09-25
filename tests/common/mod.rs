@@ -2,14 +2,16 @@
 //! synchronously and drawing after every event, like the runtime does.
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
 use crossterm::event::{
     Event as Input, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use gitpane::app::{App, Effect, Event};
+use gitpane::app::{App, Effect, Event, Job};
 use gitpane::git::{GitApi, GitError};
 use gitpane::model::{Commit, CommitFile, DiffEntry, FileEntry, RepoState, Side};
 use gitpane::{runtime, ui};
@@ -34,28 +36,80 @@ pub fn state(staged: &[&str], unstaged: &[&str]) -> RepoState {
     }
 }
 
-/// A `GitApi` returning canned results and recording status reads.
+/// A failed Git command with `stderr`.
+pub fn failure(stderr: &str) -> GitError {
+    GitError::Failed {
+        code: Some(128),
+        stderr: stderr.to_string(),
+    }
+}
+
+/// Lets a test pause the fake inside each call: the fake reports the call on
+/// `started`, then waits for one message on `release`.
+struct Gate {
+    started: Sender<String>,
+    release: Mutex<Receiver<()>>,
+}
+
+/// A `GitApi` returning canned results and recording calls as `"<name> <args>"`.
 pub struct FakeGit {
-    pub status: Result<RepoState, GitError>,
+    pub status: Mutex<Result<RepoState, GitError>>,
+    /// When set, every mutation fails with this error.
+    pub mutation_error: Mutex<Option<GitError>>,
     pub calls: Mutex<Vec<String>>,
+    gate: Option<Gate>,
 }
 
 impl FakeGit {
     pub fn new(status: Result<RepoState, GitError>) -> Self {
         Self {
-            status,
+            status: Mutex::new(status),
+            mutation_error: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
+            gate: None,
+        }
+    }
+
+    /// A fake that blocks in every call until released; returns the fake, the
+    /// receiver of started calls, and the release sender.
+    pub fn gated(status: Result<RepoState, GitError>) -> (Self, Receiver<String>, Sender<()>) {
+        let (started, started_rx) = mpsc::channel();
+        let (release_tx, release) = mpsc::channel();
+        let fake = Self {
+            gate: Some(Gate {
+                started,
+                release: Mutex::new(release),
+            }),
+            ..Self::new(status)
+        };
+        (fake, started_rx, release_tx)
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn record(&self, call: String) {
+        self.calls.lock().unwrap().push(call.clone());
+        if let Some(gate) = &self.gate {
+            gate.started.send(call).unwrap();
+            gate.release.lock().unwrap().recv().unwrap();
+        }
+    }
+
+    fn mutation(&self, name: &str, paths: &[&str]) -> Result<(), GitError> {
+        self.record(format!("{name} {}", paths.join(" ")));
+        match self.mutation_error.lock().unwrap().clone() {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
 
 impl GitApi for FakeGit {
     fn status(&self, root: &Path) -> Result<RepoState, GitError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("status {}", root.display()));
-        self.status.clone()
+        self.record(format!("status {}", root.display()));
+        self.status.lock().unwrap().clone()
     }
     fn files(&self, _: &Path) -> Result<Vec<String>, GitError> {
         Ok(Vec::new())
@@ -69,17 +123,17 @@ impl GitApi for FakeGit {
     fn diff(&self, _: &Path, _: &DiffEntry) -> Result<String, GitError> {
         Ok(String::new())
     }
-    fn stage(&self, _: &Path, _: &[&str]) -> Result<(), GitError> {
-        Ok(())
+    fn stage(&self, _: &Path, paths: &[&str]) -> Result<(), GitError> {
+        self.mutation("stage", paths)
     }
-    fn unstage(&self, _: &Path, _: &[&str]) -> Result<(), GitError> {
-        Ok(())
+    fn unstage(&self, _: &Path, paths: &[&str]) -> Result<(), GitError> {
+        self.mutation("unstage", paths)
     }
-    fn restore(&self, _: &Path, _: &[&str]) -> Result<(), GitError> {
-        Ok(())
+    fn restore(&self, _: &Path, paths: &[&str]) -> Result<(), GitError> {
+        self.mutation("restore", paths)
     }
-    fn clean(&self, _: &Path, _: &[&str]) -> Result<(), GitError> {
-        Ok(())
+    fn clean(&self, _: &Path, paths: &[&str]) -> Result<(), GitError> {
+        self.mutation("clean", paths)
     }
     fn git_dirs(&self, root: &Path) -> Result<(PathBuf, PathBuf), GitError> {
         Ok((root.join(".git"), root.join(".git")))
@@ -90,6 +144,9 @@ pub struct Harness {
     pub app: App,
     pub git: FakeGit,
     pub quit: bool,
+    /// When true, Git jobs wait in `held` until the test runs them.
+    pub hold: bool,
+    pub held: VecDeque<Job>,
     terminal: Terminal<TestBackend>,
 }
 
@@ -105,11 +162,28 @@ impl Harness {
         width: u16,
         height: u16,
     ) -> Self {
+        Self::start(status, show_shortcuts, width, height, false)
+    }
+
+    /// Like `new`, but every Git job, including the startup read, is held.
+    pub fn held(status: Result<RepoState, GitError>) -> Self {
+        Self::start(status, false, 100, 30, true)
+    }
+
+    fn start(
+        status: Result<RepoState, GitError>,
+        show_shortcuts: bool,
+        width: u16,
+        height: u16,
+        hold: bool,
+    ) -> Self {
         let app = App::new(PathBuf::from(ROOT), show_shortcuts);
         let mut harness = Self {
             app,
             git: FakeGit::new(status),
             quit: false,
+            hold,
+            held: VecDeque::new(),
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
         };
         harness.draw();
@@ -123,6 +197,7 @@ impl Harness {
         for effect in effects {
             match effect {
                 Effect::Quit => self.quit = true,
+                Effect::Git(job) if self.hold => self.held.push_back(job),
                 Effect::Git(job) => {
                     let event = runtime::run_job(&self.git, job);
                     let effects = self.app.update(event);
@@ -130,6 +205,13 @@ impl Harness {
                 }
             }
         }
+    }
+
+    /// Run the oldest held job, like the Git queue, and return its result
+    /// event without applying it, so the test chooses the delivery order.
+    pub fn run_next(&mut self) -> Event {
+        let job = self.held.pop_front().expect("a held Git job");
+        runtime::run_job(&self.git, job)
     }
 
     /// Apply `event`, execute its effects, and redraw.

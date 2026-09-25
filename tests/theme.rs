@@ -129,4 +129,85 @@ fn long_status_path_occupies_one_row() {
     let (_, long_row) = harness.at("[ ] M src/very");
     let (_, short_row) = harness.at("short.txt");
     assert_eq!(short_row, long_row + 1);
+    // The row is cut at the list border rather than spilling past it.
+    assert!(!harness.screen().contains("final_file_name"));
+    assert_eq!(harness.buffer()[(29, long_row)].symbol(), "│");
+}
+
+/// Hovering, highlighting, and focusing rows gives four distinct, readable states.
+#[test]
+fn list_row_states_keep_a_readable_hierarchy() {
+    let mut harness = Harness::new(Ok(state(&[], &["first.txt", "second.txt", "third.txt"])));
+    let first = harness.at("first.txt");
+    let second = harness.at("second.txt");
+    let third = harness.at("third.txt");
+    // Startup highlights the first row; move focus away from the list.
+    harness.press(KeyCode::Tab);
+
+    let ordinary = background(&harness, third);
+    assert!(cell_contrast(&harness, third) >= TEXT_FLOOR);
+
+    harness.hover(third);
+    let hovered = background(&harness, third);
+    assert!(cell_contrast(&harness, third) >= TEXT_FLOOR);
+
+    harness.hover(second);
+    assert_eq!(background(&harness, third), ordinary);
+    let highlighted = background(&harness, first);
+    assert!(cell_contrast(&harness, first) >= TEXT_FLOOR);
+
+    harness.press(KeyCode::BackTab);
+    let focused = background(&harness, first);
+    assert!(cell_contrast(&harness, first) >= TEXT_FLOOR);
+    assert!(harness.buffer()[first].modifier.contains(Modifier::BOLD));
+    let border = &harness.buffer()[(0, first.1)];
+    assert!(contrast(border.fg, border.bg) >= INDICATOR_FLOOR);
+
+    // Hovering the focused selection must not weaken the selection.
+    harness.hover(first);
+    assert_eq!(background(&harness, first), focused);
+
+    let states = [ordinary, hovered, highlighted, focused];
+    for (index, state) in states.iter().enumerate() {
+        assert!(!states[index + 1..].contains(state), "{states:?}");
+    }
+}
+
+/// Row actions stay readable wherever they are revealed.
+#[test]
+fn row_actions_are_readable_when_revealed() {
+    let mut harness = Harness::new(Ok(state(&[], &["first.txt", "second.txt"])));
+    let action = |harness: &Harness, y: u16, glyph: &str| {
+        let line: Vec<String> = (0..30)
+            .map(|x| harness.buffer()[(x, y)].symbol().to_string())
+            .collect();
+        let x = line.iter().position(|cell| cell == glyph);
+        x.map(|x| (x as u16, y))
+            .unwrap_or_else(|| panic!("{glyph} not in row {y}:\n{}", harness.screen()))
+    };
+    let (_, first) = harness.at("first.txt");
+    let (_, second) = harness.at("second.txt");
+
+    // Revealed by the highlight in the focused list.
+    for glyph in ["↑", "↶"] {
+        let cell = action(&harness, first, glyph);
+        assert!(
+            cell_contrast(&harness, cell) >= TEXT_FLOOR,
+            "focused {glyph}"
+        );
+    }
+    // Revealed by hovering the row, then hovering the action itself.
+    harness.hover(harness.at("second.txt"));
+    for glyph in ["↑", "↶"] {
+        let cell = action(&harness, second, glyph);
+        assert!(
+            cell_contrast(&harness, cell) >= TEXT_FLOOR,
+            "hovered row {glyph}"
+        );
+        harness.hover(cell);
+        assert!(
+            cell_contrast(&harness, cell) >= TEXT_FLOOR,
+            "hovered {glyph}"
+        );
+    }
 }
