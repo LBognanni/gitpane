@@ -171,10 +171,10 @@ pub fn render_scrollbar(
         };
         buf[(x, y)].reset();
         match half_on {
-            // A thinner bar: the upper half block over the pane surface.
+            // A thinner bar: the lower half block over the pane surface.
             Some(pane) => {
                 buf[(x, y)]
-                    .set_symbol("▀")
+                    .set_symbol("▄")
                     .set_style(Style::new().fg(color).bg(pane));
             }
             None => {
