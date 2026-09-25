@@ -1400,7 +1400,7 @@ rewrite, is among the simpler parts.
 | RS-S5 — Application shell | Done | RS-S4 | Layout, focus, hit map, toasts, modals, shortcuts |
 | RS-S6 — Resizable layout | Done | RS-S5 | Splitters on both tabs |
 | RS-S7 — Changes lists and actions | Done | RS-S6 | Status lists, actions, git queue |
-| RS-S8 — Diff pane | Not started | RS-S7 | Highlighted diffs and change navigation |
+| RS-S8 — Diff pane | Done | RS-S7 | Highlighted diffs and change navigation |
 | RS-S9 — History | Not started | RS-S8 | Commit tree and historical diffs |
 | RS-S10 — Files tab | Not started | RS-S9 | Files tree, preview, file jump |
 | RS-S11 — Automatic refresh | Not started | RS-S10 | Watcher and quiet reconciliation |
