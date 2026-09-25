@@ -69,6 +69,18 @@ pub fn run_job(git: &dyn GitApi, job: Job) -> Event {
                     .map(|patch| diff_document(path, &patch)),
             }
         }
+        Job::History { root, token } => Event::History {
+            token,
+            result: git.commits(&root),
+        },
+        Job::CommitFiles {
+            root,
+            commit,
+            token,
+        } => Event::CommitFiles {
+            token,
+            result: git.commit_files(&root, &commit),
+        },
     }
 }
 
@@ -141,10 +153,12 @@ fn spawn_latest(git: Arc<dyn GitApi>, tx: Sender<Event>) -> Sender<Job> {
     jobs
 }
 
-/// Job senders: the FIFO Git queue and the latest-only diff worker.
+/// Job senders: the FIFO Git queue and the latest-only workers.
 struct Workers {
     git: Sender<Job>,
     diff: Sender<Job>,
+    history: Sender<Job>,
+    commit_files: Sender<Job>,
 }
 
 pub fn run(terminal: &mut DefaultTerminal, git: Arc<dyn GitApi>, mut app: App) -> io::Result<()> {
@@ -152,7 +166,9 @@ pub fn run(terminal: &mut DefaultTerminal, git: Arc<dyn GitApi>, mut app: App) -
     spawn_input(tx.clone());
     let jobs = Workers {
         git: spawn_git(git.clone(), tx.clone()),
-        diff: spawn_latest(git, tx),
+        diff: spawn_latest(git.clone(), tx.clone()),
+        history: spawn_latest(git.clone(), tx.clone()),
+        commit_files: spawn_latest(git, tx),
     };
     terminal.draw(|frame| ui::render(&mut app, frame))?;
     if execute(app.start(), &jobs) {
@@ -198,6 +214,12 @@ fn execute(effects: Vec<Effect>, jobs: &Workers) -> bool {
             Effect::Quit => return true,
             Effect::Git(job @ Job::Diff { .. }) => {
                 let _ = jobs.diff.send(job);
+            }
+            Effect::Git(job @ Job::History { .. }) => {
+                let _ = jobs.history.send(job);
+            }
+            Effect::Git(job @ Job::CommitFiles { .. }) => {
+                let _ = jobs.commit_files.send(job);
             }
             Effect::Git(job) => {
                 let _ = jobs.git.send(job);

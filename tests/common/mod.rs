@@ -58,6 +58,9 @@ pub struct FakeGit {
     pub mutation_error: Mutex<Option<GitError>>,
     /// Patch text (or error) per path; missing paths have an empty diff.
     pub diffs: Mutex<HashMap<String, Result<String, GitError>>>,
+    pub commits: Mutex<Result<Vec<Commit>, GitError>>,
+    /// Files per commit hash; missing commits have no files.
+    pub commit_files: Mutex<HashMap<String, Vec<CommitFile>>>,
     pub calls: Mutex<Vec<String>>,
     gate: Option<Gate>,
 }
@@ -68,6 +71,8 @@ impl FakeGit {
             status: Mutex::new(status),
             mutation_error: Mutex::new(None),
             diffs: Mutex::new(HashMap::new()),
+            commits: Mutex::new(Ok(Vec::new())),
+            commit_files: Mutex::new(HashMap::new()),
             calls: Mutex::new(Vec::new()),
             gate: None,
         }
@@ -123,10 +128,12 @@ impl GitApi for FakeGit {
         Ok(Vec::new())
     }
     fn commits(&self, _: &Path) -> Result<Vec<Commit>, GitError> {
-        Ok(Vec::new())
+        self.commits.lock().unwrap().clone()
     }
-    fn commit_files(&self, _: &Path, _: &Commit) -> Result<Vec<CommitFile>, GitError> {
-        Ok(Vec::new())
+    fn commit_files(&self, _: &Path, commit: &Commit) -> Result<Vec<CommitFile>, GitError> {
+        self.record(format!("commit_files {}", commit.hash));
+        let files = self.commit_files.lock().unwrap();
+        Ok(files.get(&commit.hash).cloned().unwrap_or_default())
     }
     fn diff(&self, _: &Path, entry: &DiffEntry) -> Result<String, GitError> {
         let path = match entry {
@@ -161,6 +168,10 @@ pub struct Harness {
     /// When true, Git jobs wait in `held` until the test runs them.
     pub hold: bool,
     pub held: VecDeque<Job>,
+    /// When true, history and commit-file jobs wait in `held_history`.
+    pub hold_history: bool,
+    /// Held history and commit-file jobs, kept apart from the Git queue's.
+    pub held_history: VecDeque<Job>,
     /// Text copied to the clipboard, in order.
     pub copied: Vec<String>,
     terminal: Terminal<TestBackend>,
@@ -200,6 +211,8 @@ impl Harness {
             quit: false,
             hold,
             held: VecDeque::new(),
+            hold_history: false,
+            held_history: VecDeque::new(),
             copied: Vec::new(),
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
         };
@@ -215,7 +228,17 @@ impl Harness {
             match effect {
                 Effect::Quit => self.quit = true,
                 Effect::Copy(text) => self.copied.push(text),
-                Effect::Git(job) if self.hold => self.held.push_back(job),
+                Effect::Git(job @ (Job::History { .. } | Job::CommitFiles { .. }))
+                    if self.hold_history =>
+                {
+                    self.held_history.push_back(job)
+                }
+                Effect::Git(job)
+                    if self.hold
+                        && !matches!(job, Job::History { .. } | Job::CommitFiles { .. }) =>
+                {
+                    self.held.push_back(job)
+                }
                 Effect::Git(job) => {
                     let event = runtime::run_job(&self.git, job);
                     let effects = self.app.update(event);
@@ -229,6 +252,12 @@ impl Harness {
     /// event without applying it, so the test chooses the delivery order.
     pub fn run_next(&mut self) -> Event {
         let job = self.held.pop_front().expect("a held Git job");
+        runtime::run_job(&self.git, job)
+    }
+
+    /// Run the oldest held history or commit-files job and return its result event.
+    pub fn run_history(&mut self) -> Event {
+        let job = self.held_history.pop_front().expect("a held history job");
         runtime::run_job(&self.git, job)
     }
 
