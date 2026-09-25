@@ -787,7 +787,8 @@ fn render_shortcuts(app: &mut App, area: Rect, buf: &mut Buffer) {
         width: BUTTON_WIDTH.min(button.width),
         ..button
     };
-    dialog_button("Close", false, true, close, buf);
+    let hovered = app.hover == Some(Target::CloseShortcuts);
+    dialog_button("Close", false, true, hovered, close, buf);
     app.hits.push((close, Target::CloseShortcuts));
 }
 
@@ -834,8 +835,11 @@ fn render_discard(
         Constraint::Length(BUTTON_WIDTH),
     ])
     .areas(buttons);
-    dialog_button("Cancel", false, !confirm, cancel, buf);
-    dialog_button("Discard", true, confirm, discard, buf);
+    let hover = app.hover;
+    let cancel_hovered = hover == Some(Target::CancelDiscard);
+    let discard_hovered = hover == Some(Target::ConfirmDiscard);
+    dialog_button("Cancel", false, !confirm, cancel_hovered, cancel, buf);
+    dialog_button("Discard", true, confirm, discard_hovered, discard, buf);
     app.hits.push((cancel, Target::CancelDiscard));
     app.hits.push((discard, Target::ConfirmDiscard));
 }
@@ -847,7 +851,15 @@ const BUTTON_WIDTH: u16 = 16;
 /// a lighter `▔` top edge and a darker `▁` bottom edge. A default button is a
 /// `$surface` block, or a `$primary` one with a white label while focused. A
 /// `danger` (error variant) button stays red and lightens slightly while focused.
-fn dialog_button(label: &str, danger: bool, focused: bool, area: Rect, buf: &mut Buffer) {
+/// Hovering lightens any button a little further, like Textual's `:hover`.
+fn dialog_button(
+    label: &str,
+    danger: bool,
+    focused: bool,
+    hovered: bool,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     let shade = |background: Color, amount: f32| match background {
         Color::Rgb(r, g, b) => {
             let mix = |c: u8| {
@@ -863,6 +875,12 @@ fn dialog_button(label: &str, danger: bool, focused: bool, area: Rect, buf: &mut
         (true, true) => (theme::CANVAS, shade(theme::DANGER, 0.1)),
         (false, false) => (theme::TEXT, theme::SURFACE),
         (false, true) => (Color::Rgb(255, 255, 255), theme::PRIMARY),
+    };
+    // Half the focused danger step, so hover never mimics focus.
+    let background = if hovered {
+        shade(background, 0.05)
+    } else {
+        background
     };
     let style = Style::new().fg(foreground).bg(background);
     buf.set_style(area, style);
@@ -942,6 +960,20 @@ fn render_file_jump(
         .jump_offset
         .min(matches.len().saturating_sub(visible as usize));
     let offset = app.jump_offset;
+    let (results, vbar, _) = scrollbar_layout(results, matches.len(), 0);
+    if let Some(bar) = vbar {
+        render_scrollbar(
+            buf,
+            bar,
+            true,
+            matches.len(),
+            visible as usize,
+            offset,
+            None,
+        );
+        let scrollbar = Scrollbar::new(bar, true, matches.len(), visible as usize);
+        app.hits.push((bar, Target::JumpScrollbar(scrollbar)));
+    }
     for (row, path) in matches
         .iter()
         .enumerate()
