@@ -11,9 +11,11 @@ use crate::code_view::CodeView;
 use crate::document::Document;
 use crate::git::GitError;
 use crate::layout::{Panes, Splitter};
-use crate::model::{FileEntry, RepoState, Side};
+use crate::model::{DiffEntry, FileEntry, RepoState, Side};
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
+/// Context rows kept above a change when scrolling to it.
+const CHANGE_CONTEXT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -215,6 +217,12 @@ pub enum Job {
         entries: Vec<FileEntry>,
         token: u64,
     },
+    /// Load the diff of `entry`; runs on the latest-only diff worker.
+    Diff {
+        root: PathBuf,
+        entry: DiffEntry,
+        token: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -228,12 +236,19 @@ pub enum Event {
         result: Result<RepoState, GitError>,
         failed: Option<(Action, GitError)>,
     },
+    /// A diff document for request `token`.
+    Diff {
+        token: u64,
+        result: Result<Document, GitError>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     Quit,
     Git(Job),
+    /// Copy text to the system clipboard.
+    Copy(String),
 }
 
 /// An in-progress splitter drag.
@@ -257,6 +272,13 @@ pub struct App {
     status_token: u64,
     /// The entry whose diff was last requested.
     pub selection: Option<FileEntry>,
+    diff_token: u64,
+    /// A normal diff load is pending.
+    pub diff_loading: bool,
+    /// The current change of the diff document, if it has any.
+    change_index: Option<usize>,
+    /// The viewer receiving mouse drags until the button is released.
+    capture: Option<Focus>,
     pub modal: Option<Modal>,
     pub toasts: Vec<Toast>,
     next_toast: u64,
@@ -284,6 +306,10 @@ impl App {
             status_loading: true,
             status_token: 0,
             selection: None,
+            diff_token: 0,
+            diff_loading: false,
+            change_index: None,
+            capture: None,
             modal: show_shortcuts.then_some(Modal::Shortcuts),
             toasts: Vec::new(),
             next_toast: 0,
@@ -329,6 +355,8 @@ impl App {
     /// Start a manual status refresh and return the token of its request.
     fn start_status_refresh(&mut self) -> u64 {
         self.status_token += 1;
+        // Drop pending diff loads without clearing the diff.
+        self.diff_token += 1;
         self.status_loading = true;
         self.status_token
     }
@@ -377,12 +405,86 @@ impl App {
         Vec::new()
     }
 
-    /// Select `entry` for the diff pane.
-    fn select(&mut self, entry: FileEntry) {
+    /// Select `entry` for the diff pane and load its diff.
+    fn select(&mut self, entry: FileEntry) -> Vec<Effect> {
         self.diff_title = entry.path.clone();
-        let message = entry.unsupported_reason.as_deref().unwrap_or("");
-        self.diff_view.set_document(Document::message(message));
-        self.selection = Some(entry);
+        self.change_index = None;
+        self.diff_token += 1;
+        self.selection = Some(entry.clone());
+        if let Some(reason) = &entry.unsupported_reason {
+            self.diff_loading = false;
+            self.apply_diff(Document::message(reason));
+            return Vec::new();
+        }
+        self.diff_loading = true;
+        vec![Effect::Git(Job::Diff {
+            root: self.root.clone(),
+            entry: DiffEntry::File(entry),
+            token: self.diff_token,
+        })]
+    }
+
+    /// Show a loaded diff and scroll to its first change.
+    fn apply_diff(&mut self, doc: Document) {
+        self.change_index = (!doc.changes.is_empty()).then_some(0);
+        self.diff_view.set_document(doc);
+        self.scroll_to_change();
+    }
+
+    /// Clear the selection, title, document, and change buttons; drop pending loads.
+    fn invalidate_diff(&mut self) {
+        self.diff_token += 1;
+        self.diff_loading = false;
+        self.selection = None;
+        self.diff_title.clear();
+        self.change_index = None;
+        self.diff_view.set_document(Document::empty());
+    }
+
+    fn scroll_to_change(&mut self) {
+        let Some(index) = self.change_index else {
+            return;
+        };
+        let row = self.diff_view.document().changes[index].saturating_sub(CHANGE_CONTEXT);
+        let (_, y) = self.diff_view.scroll_offset();
+        self.diff_view.scroll_to(0, y);
+        self.diff_view.scroll_to_row(row);
+    }
+
+    /// Whether a change button can be pressed.
+    pub fn enabled(&self, button: Button) -> bool {
+        let count = self.diff_view.document().changes.len();
+        match (button, self.change_index) {
+            (Button::PreviousChange, Some(index)) => index > 0,
+            (Button::NextChange, Some(index)) => index + 1 < count,
+            (Button::PreviousChange | Button::NextChange, None) => false,
+            _ => true,
+        }
+    }
+
+    /// Move to the next (`forward`) or previous change, if there is one.
+    fn navigate(&mut self, forward: bool) {
+        let button = if forward {
+            Button::NextChange
+        } else {
+            Button::PreviousChange
+        };
+        if let Some(index) = self.change_index.filter(|_| self.enabled(button)) {
+            self.change_index = Some(if forward { index + 1 } else { index - 1 });
+            self.scroll_to_change();
+        }
+    }
+
+    fn view_mut(&mut self, focus: Focus) -> &mut CodeView {
+        match focus {
+            Focus::Preview => &mut self.preview_view,
+            _ => &mut self.diff_view,
+        }
+    }
+
+    /// The focused viewer, if a viewer has focus.
+    fn focused_view(&mut self) -> Option<&mut CodeView> {
+        matches!(self.focus, Focus::Diff | Focus::Preview).then(|| self.view_mut(self.focus))
     }
 
     /// The hint for the hovered button, if any.
@@ -448,12 +550,23 @@ impl App {
                     return Vec::new();
                 }
                 self.status_loading = false;
+                self.diff_loading = false;
                 match result {
                     Ok(state) => {
                         self.apply_status(state);
                         self.focus_first_entry();
                     }
                     Err(error) => self.git_error("refresh status", &error),
+                }
+            }
+            Event::Diff { token, result } => {
+                if token != self.diff_token {
+                    return Vec::new();
+                }
+                self.diff_loading = false;
+                match result {
+                    Ok(doc) => self.apply_diff(doc),
+                    Err(error) => self.git_error("load diff", &error),
                 }
             }
         }
@@ -465,9 +578,7 @@ impl App {
         self.branch = state.branch;
         self.staged = StatusList::new(state.staged);
         self.unstaged = StatusList::new(state.unstaged);
-        self.selection = None;
-        self.diff_title.clear();
-        self.diff_view.set_document(Document::message(""));
+        self.invalidate_diff();
     }
 
     /// Highlight and focus the first entry, Staged before Unstaged (manual loads only).
@@ -552,7 +663,7 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if let Some(entry) = list.highlighted().cloned() {
-                        self.select(entry);
+                        return self.select(entry);
                     }
                 }
                 KeyCode::Char('s') => {
@@ -576,6 +687,21 @@ impl App {
             KeyCode::Char('2') => self.show_tab(Tab::Files),
             KeyCode::Tab => self.cycle_focus(true),
             KeyCode::BackTab => self.cycle_focus(false),
+            KeyCode::Char('n') if self.tab == Tab::Changes => self.navigate(true),
+            KeyCode::Char('p') if self.tab == Tab::Changes => self.navigate(false),
+            KeyCode::Char('w') => {
+                let view = match self.tab {
+                    Tab::Changes => &mut self.diff_view,
+                    Tab::Files => &mut self.preview_view,
+                };
+                view.set_wrapped(!view.wrapped());
+            }
+            // App shortcuts win: only unmodified keys reach a focused viewer.
+            _ if (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
+                if let Some(view) = self.focused_view() {
+                    view.handle_key(key);
+                }
+            }
             _ => {}
         }
         Vec::new()
@@ -605,8 +731,14 @@ impl App {
                 let entries = self.list(side).checked_entries();
                 self.request(action, entries)
             }
-            // Change buttons stay disabled until the diff pane story.
-            Button::PreviousChange | Button::NextChange => Vec::new(),
+            Button::PreviousChange => {
+                self.navigate(false);
+                Vec::new()
+            }
+            Button::NextChange => {
+                self.navigate(true);
+                Vec::new()
+            }
         }
     }
 
@@ -632,14 +764,36 @@ impl App {
             }
             return Vec::new();
         }
+        // A viewer that took a press receives drags and the release.
+        if let Some(focus) = self.capture
+            && matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+        {
+            let copied = self.view_mut(focus).handle_mouse(mouse);
+            if matches!(mouse.kind, MouseEventKind::Up(_)) {
+                self.capture = None;
+            }
+            return copied.map(Effect::Copy).into_iter().collect();
+        }
         let target = self.hit(Position::new(mouse.column, mouse.row));
         match mouse.kind {
+            MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {
+                if let Some(Target::Pane(focus @ (Focus::Diff | Focus::Preview))) = target {
+                    self.view_mut(focus).handle_mouse(mouse);
+                }
+            }
             MouseEventKind::Moved => self.hover = target,
             MouseEventKind::Down(MouseButton::Left) => match target {
                 Some(Target::Tab(tab)) => self.show_tab(tab),
                 Some(Target::Pane(focus)) => {
                     self.tab = focus.tab();
                     self.focus = focus;
+                    if matches!(focus, Focus::Diff | Focus::Preview) {
+                        self.capture = Some(focus);
+                        self.view_mut(focus).handle_mouse(mouse);
+                    }
                 }
                 Some(Target::CloseShortcuts) => self.modal = None,
                 Some(Target::CancelDiscard) => return self.close_discard(false),
@@ -648,7 +802,7 @@ impl App {
                     self.focus_list(side);
                     self.list_mut(side).highlight = Some(index);
                     if let Some(entry) = self.list(side).entries.get(index).cloned() {
-                        self.select(entry);
+                        return self.select(entry);
                     }
                 }
                 Some(Target::Checkbox(side, index)) => {

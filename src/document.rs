@@ -35,7 +35,23 @@ pub struct Document {
     sides: Vec<Source>,
 }
 
+impl std::fmt::Debug for Document {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Document({} rows)", self.rows.len())
+    }
+}
+
 impl Document {
+    /// A document with no rows.
+    pub fn empty() -> Self {
+        Self {
+            rows: Vec::new(),
+            changes: Vec::new(),
+            wrap_indent: 0,
+            sides: Vec::new(),
+        }
+    }
+
     /// A document holding one plain message row.
     pub fn message(text: &str) -> Self {
         Self {

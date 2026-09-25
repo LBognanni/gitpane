@@ -171,7 +171,13 @@ fn render_changes(app: &mut App, area: Rect, buf: &mut Buffer) {
         &[Button::PreviousChange, Button::NextChange],
         buf,
     );
-    render_view(&mut app.diff_view, view, buf);
+    if app.diff_loading {
+        Paragraph::new(loading_line())
+            .style(Style::new().fg(theme::TEXT).bg(theme::DIFF_BACKGROUND))
+            .render(view, buf);
+    } else {
+        render_view(&mut app.diff_view, view, buf);
+    }
     app.hits.push((view, Target::Pane(Focus::Diff)));
 }
 
@@ -369,16 +375,14 @@ fn viewer_title(app: &mut App, area: Rect, label: &str, buttons: &[Button], buf:
             width: 3.min(rest.width),
             ..rest
         };
-        let style = match button {
-            // Change buttons stay disabled until the diff pane story (RS-S8).
-            Button::PreviousChange | Button::NextChange => {
-                theme::title().add_modifier(Modifier::DIM)
-            }
-            _ => button_style(
+        let style = if app.enabled(button) {
+            button_style(
                 button,
                 app.hover == Some(Target::Button(button)),
                 theme::title(),
-            ),
+            )
+        } else {
+            theme::title().add_modifier(Modifier::DIM)
         };
         Span::styled(glyph(button), style).render(rect, buf);
         app.hits.push((rect, Target::Button(button)));

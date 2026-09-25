@@ -211,3 +211,100 @@ fn row_actions_are_readable_when_revealed() {
         );
     }
 }
+
+/// Open `a.txt` at 100x30 with `patch` as its loaded diff.
+fn diff_harness(patch: &str) -> Harness {
+    let mut harness = Harness::new(Ok(state(&[], &["a.txt"])));
+    harness.git.set_diff("a.txt", Ok(patch.to_string()));
+    harness.press(KeyCode::Enter);
+    harness
+}
+
+#[test]
+fn diff_rows_style_additions_and_removals() {
+    let harness = diff_harness(
+        "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n context\n+added\n-removed\n",
+    );
+    let mut backgrounds = Vec::new();
+    for (index, marker) in ["context", "added", "removed"].into_iter().enumerate() {
+        let position = harness.at(marker);
+        assert_eq!(position.1, 2 + index as u16, "{marker}");
+        assert!(cell_contrast(&harness, position) >= TEXT_FLOOR, "{marker}");
+        backgrounds.push(background(&harness, position));
+    }
+    assert_ne!(backgrounds[0], backgrounds[1]);
+    assert_ne!(backgrounds[0], backgrounds[2]);
+    assert_ne!(backgrounds[1], backgrounds[2]);
+    // The marker starts each changed row in the pane.
+    assert_eq!(harness.buffer()[(31, 3)].symbol(), "+");
+    assert_eq!(harness.buffer()[(31, 4)].symbol(), "-");
+}
+
+#[test]
+fn selected_diff_text_is_readable() {
+    let mut harness =
+        diff_harness("--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n selected words here\n");
+    let start = harness.at("selected");
+    let rest = harness.at("here");
+    let plain = background(&harness, start);
+    harness.drag(start, (start.0 + 8, start.1));
+    let selected = background(&harness, start);
+    assert_ne!(selected, plain);
+    assert_eq!(background(&harness, rest), plain);
+    assert!(cell_contrast(&harness, start) >= TEXT_FLOOR);
+    assert!(harness.line(start.1).contains("selected words here"));
+}
+
+#[test]
+fn scrollbars_are_distinguishable_from_the_code_view() {
+    let mut patch = String::from("--- a/a.txt\n+++ b/a.txt\n@@ -1,100 +1,100 @@\n");
+    for _ in 0..100 {
+        patch.push_str(&format!(" {}\n", "x".repeat(300)));
+    }
+    let harness = diff_harness(&patch);
+    let view = harness.app.diff_view.viewport();
+    // Thumbs start at the top-left of each track.
+    let vertical_thumb = (view.right(), view.y);
+    let vertical_track = (view.right(), view.bottom() - 1);
+    let horizontal_thumb = (view.x, view.bottom());
+    let horizontal_track = (view.right() - 1, view.bottom());
+    for (thumb, track) in [
+        (vertical_thumb, vertical_track),
+        (horizontal_thumb, horizontal_track),
+    ] {
+        let contrast = contrast(background(&harness, thumb), background(&harness, track));
+        assert!(contrast >= INDICATOR_FLOOR, "{thumb:?} {track:?}");
+    }
+}
+
+#[test]
+fn long_diff_title_keeps_navigation_visible_and_right_aligned() {
+    let long = format!(
+        "src/{}final_file_name.py",
+        "very_long_directory_name/".repeat(8)
+    );
+    let mut harness = Harness::new(Ok(state(&[], &[&long])));
+    let mut patch = String::from("--- a/a\n+++ b/a\n@@ -1,18 +1,20 @@\n");
+    for index in 0..20 {
+        let marker = if index == 2 || index == 10 { '+' } else { ' ' };
+        patch.push_str(&format!("{marker}line {index}\n"));
+    }
+    harness.git.set_diff(&long, Ok(patch));
+    harness.press(KeyCode::Enter);
+
+    let title = harness.line(1);
+    let pane: String = title.chars().skip(31).collect();
+    assert!(pane.starts_with(" src/very_long_directory_name/"), "{pane}");
+    assert!(!harness.screen().contains("final_file_name"));
+    let up = pane
+        .chars()
+        .position(|c| c == '↑')
+        .expect("previous button");
+    let down = pane.chars().position(|c| c == '↓').expect("next button");
+    assert_eq!(down, up + 3);
+    // Right aligned: only the bar's one-cell padding follows the buttons.
+    assert_eq!(31 + down + 2, 100 - 1);
+    // Navigation is enabled: the diff has a second change.
+    let cell = &harness.buffer()[(31 + down as u16, 1)];
+    assert!(!cell.modifier.contains(Modifier::DIM));
+}

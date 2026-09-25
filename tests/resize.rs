@@ -82,11 +82,14 @@ fn dragging_a_splitter_across_the_diff_never_selects_text() {
     harness.draw();
     let (x, y) = sidebar_splitter(&harness);
     harness.mouse_down((x, y));
+    // Real button-held drag events that sweep across the diff text.
     for step in 1..=6 {
-        harness.hover((x + step * 5, y + step));
+        harness.drag_to((x + step * 5, y + step));
     }
     harness.mouse_up((x + 30, y + 6));
     assert_eq!(harness.app.diff_view.selected_text(), None);
+    assert!(harness.copied.is_empty());
+    assert_eq!(harness.app.focus, Focus::Staged);
 }
 
 #[test]
@@ -178,8 +181,8 @@ fn resizing_keeps_usable_panes_and_scrolling() {
         assert!(max_x > 0 && max_y > 0, "{width}x{height}");
     }
 
-    harness.app.diff_view.set_wrapped(true);
-    harness.draw();
+    harness.press(KeyCode::Char('w'));
+    assert!(harness.app.diff_view.wrapped());
     let view = &harness.app.diff_view;
     assert_eq!(view.max_scroll().0, 0);
     assert!(view.max_scroll().1 > 0);
