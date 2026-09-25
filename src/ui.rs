@@ -9,11 +9,12 @@ use crate::app::{
     Action, App, Button, FileNode, Focus, MAX_FILE_JUMP_RESULTS, Modal, Severity, Tab, Target,
     TreeRow,
 };
-use crate::code_view::CodeView;
+use crate::code_view::{CodeView, render_scrollbar, scrollbar_layout};
 use crate::icons;
 use crate::layout::{Group, Splitter};
 use crate::model::{Commit, Side};
 use crate::theme;
+use unicode_width::UnicodeWidthStr;
 
 const TOAST_WIDTH: u16 = 50;
 const SHORTCUTS_WIDTH: u16 = 60;
@@ -169,11 +170,16 @@ fn splitter(app: &mut App, splitter: Splitter, area: Rect, buf: &mut Buffer) {
         },
         if active { theme::ACCENT } else { theme::BORDER },
     );
+    // Section splitters sit inside the sidebar, on its surface.
+    let background = match splitter {
+        Splitter::Section(_) => theme::SURFACE,
+        Splitter::Sidebar | Splitter::Files => theme::CANVAS,
+    };
     for position in area.positions() {
         buf[position]
             .set_symbol(symbol)
             .set_fg(color)
-            .set_bg(theme::CANVAS);
+            .set_bg(background);
     }
     app.hits.push((area, Target::Splitter(splitter)));
 }
@@ -193,12 +199,7 @@ fn render_changes(app: &mut App, area: Rect, buf: &mut Buffer) {
         Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(commits);
     viewer_title(app, title, "Commits", &[], buf);
     let loading = app.tree_loading();
-    bordered_list(
-        app.focus == Focus::Commits,
-        loading.then(loading_line).into_iter().collect(),
-        list,
-        buf,
-    );
+    bordered_list(loading.then(loading_line).into_iter().collect(), list, buf);
     app.hits.push((list, Target::Pane(Focus::Commits)));
     if !loading {
         commit_rows(app, list.inner(ratatui::layout::Margin::new(1, 1)), buf);
@@ -226,12 +227,7 @@ fn render_files(app: &mut App, area: Rect, buf: &mut Buffer) {
     let [tree, divider, pane] = split_columns(&mut app.panes.files, area);
     splitter(app, Splitter::Files, divider, buf);
     let loading = app.files_tree_loading;
-    bordered_list(
-        app.focus == Focus::FilesTree,
-        loading.then(loading_line).into_iter().collect(),
-        tree,
-        buf,
-    );
+    bordered_list(loading.then(loading_line).into_iter().collect(), tree, buf);
     app.hits.push((tree, Target::Pane(Focus::FilesTree)));
     if !loading {
         file_rows(app, tree.inner(ratatui::layout::Margin::new(1, 1)), buf);
@@ -273,12 +269,7 @@ fn status_section(app: &mut App, area: Rect, side: Side, buf: &mut Buffer) {
     viewer_title(app, title_row, title, buttons, buf);
     let focused = app.focus == focus;
     let loading = app.status_loading;
-    bordered_list(
-        focused,
-        loading.then(loading_line).into_iter().collect(),
-        list,
-        buf,
-    );
+    bordered_list(loading.then(loading_line).into_iter().collect(), list, buf);
     app.hits.push((list, Target::Pane(focus)));
     if !loading {
         status_rows(
@@ -293,18 +284,24 @@ fn status_section(app: &mut App, area: Rect, side: Side, buf: &mut Buffer) {
 
 /// Draw the visible rows of a status list with their states and row actions.
 fn status_rows(app: &mut App, side: Side, focused: bool, area: Rect, buf: &mut Buffer) {
-    let height = area.height as usize;
     let list = match side {
         Side::Staged => &mut app.staged,
         Side::Unstaged => &mut app.unstaged,
     };
-    if let Some(index) = list.highlight {
-        list.offset = list
-            .offset
-            .min(index)
-            .max((index + 1).saturating_sub(height));
-    }
+    let count = list.entries.len();
+    let (area, vbar, _) = scrollbar_layout(area, count, 0);
+    let height = area.height as usize;
+    follow(
+        &mut list.offset,
+        &mut list.followed,
+        list.highlight,
+        count,
+        height,
+    );
     let offset = list.offset;
+    if let Some(bar) = vbar {
+        render_scrollbar(buf, bar, true, count, height, offset);
+    }
     let hover = app.hover;
     let list = app.list(side);
     let mut hits = Vec::new();
@@ -418,31 +415,11 @@ fn expand_gitmoji(text: &str) -> String {
 
 /// Draw the visible rows of the commit tree.
 fn commit_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
-    let height = area.height as usize;
     let tree = &mut app.commits;
-    let count = tree.rows().len();
-    tree.offset = tree.offset.min(count.saturating_sub(height));
-    if let Some(cursor) = tree.cursor {
-        tree.offset = tree
-            .offset
-            .min(cursor)
-            .max((cursor + 1).saturating_sub(height));
-    }
-    let tree = &app.commits;
-    let mut hits = Vec::new();
-    for (index, row) in tree
+    let lines = tree
         .rows()
         .into_iter()
-        .enumerate()
-        .skip(tree.offset)
-        .take(height)
-    {
-        let rect = Rect {
-            y: area.y + (index - tree.offset) as u16,
-            height: 1,
-            ..area
-        };
-        let line = match row {
+        .map(|row| match row {
             TreeRow::Commit(commit) => {
                 let node = &tree.nodes[commit];
                 let mut line = format_commit_label(&node.commit);
@@ -455,72 +432,165 @@ fn commit_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
                 Line::from(format!("    {} {}", file.status, file.path))
             }
             TreeRow::Empty(_) => Line::from("    (no changed files)"),
-        };
-        let style = if tree.cursor == Some(index) {
-            Style::new()
-                .fg(theme::TEXT)
-                .bg(theme::FOCUSED_SELECTION)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().fg(theme::TEXT).bg(theme::SURFACE)
-        };
-        buf.set_style(rect, style);
-        line.style(style).render(rect, buf);
-        hits.push((rect, Target::TreeRow(index)));
-    }
-    app.hits.extend(hits);
+        })
+        .collect();
+    let cursor = tree.cursor;
+    let focused = app.focus == Focus::Commits;
+    let tree = &mut app.commits;
+    let hits = tree_rows(
+        lines,
+        cursor,
+        focused,
+        &mut tree.offset,
+        &mut tree.scroll_x,
+        &mut tree.followed,
+        area,
+        buf,
+    );
+    app.hits.extend(
+        hits.into_iter()
+            .map(|(rect, row)| (rect, Target::TreeRow(row))),
+    );
 }
 
 /// Draw the visible rows of the Files tree.
 fn file_rows(app: &mut App, area: Rect, buf: &mut Buffer) {
-    let height = area.height as usize;
     let tree = &mut app.files;
     let rows = tree.rows();
-    tree.offset = tree.offset.min(rows.len().saturating_sub(height));
-    if let Some(cursor) = tree
-        .cursor
-        .and_then(|node| rows.iter().position(|&r| r == node))
-    {
-        tree.offset = tree
-            .offset
-            .min(cursor)
-            .max((cursor + 1).saturating_sub(height));
-    }
-    let tree = &app.files;
     let guides = tree_guides(&tree.nodes);
+    let lines = rows
+        .iter()
+        .map(|&index| {
+            let node = &tree.nodes[index];
+            let mut line = if node.dir {
+                let mut line = icons::folder_label(&node.name, node.expanded);
+                let marker = if node.expanded { EXPANDED } else { COLLAPSED };
+                line.spans.insert(0, Span::raw(marker));
+                line
+            } else {
+                icons::file_label(&node.name)
+            };
+            line.spans.insert(
+                0,
+                Span::styled(guides[index].clone(), Style::new().fg(theme::BORDER)),
+            );
+            line
+        })
+        .collect();
+    let cursor = tree
+        .cursor
+        .and_then(|node| rows.iter().position(|&r| r == node));
+    let focused = app.focus == Focus::FilesTree;
+    let tree = &mut app.files;
+    let hits = tree_rows(
+        lines,
+        cursor,
+        focused,
+        &mut tree.offset,
+        &mut tree.scroll_x,
+        &mut tree.followed,
+        area,
+        buf,
+    );
+    app.hits.extend(
+        hits.into_iter()
+            .map(|(rect, row)| (rect, Target::FileRow(row))),
+    );
+}
+
+/// Scroll `offset` so a `cursor` that moved since the last draw is visible,
+/// then clamp it to `count` rows in a window of `height`.
+fn follow(
+    offset: &mut usize,
+    followed: &mut Option<usize>,
+    cursor: Option<usize>,
+    count: usize,
+    height: usize,
+) {
+    if cursor != *followed {
+        if let Some(cursor) = cursor {
+            *offset = (*offset)
+                .min(cursor)
+                .max((cursor + 1).saturating_sub(height));
+        }
+        *followed = cursor;
+    }
+    *offset = (*offset).min(count.saturating_sub(height));
+}
+
+/// Draw a tree's `lines` scrolled to (`scroll_x`, `offset`) with scrollbars as
+/// needed, highlighting row `cursor` (bold only while `focused`); returns each
+/// drawn row's rect and index.
+#[allow(clippy::too_many_arguments)]
+fn tree_rows(
+    lines: Vec<Line<'static>>,
+    cursor: Option<usize>,
+    focused: bool,
+    offset: &mut usize,
+    scroll_x: &mut usize,
+    followed: &mut Option<usize>,
+    area: Rect,
+    buf: &mut Buffer,
+) -> Vec<(Rect, usize)> {
+    let count = lines.len();
+    let width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let (area, vbar, hbar) = scrollbar_layout(area, count, width);
+    let (window_x, height) = (area.width as usize, area.height as usize);
+    follow(offset, followed, cursor, count, height);
+    *scroll_x = (*scroll_x).min(width.saturating_sub(window_x));
     let mut hits = Vec::new();
-    for (row, &index) in rows.iter().enumerate().skip(tree.offset).take(height) {
+    for (index, line) in lines.into_iter().enumerate().skip(*offset).take(height) {
         let rect = Rect {
-            y: area.y + (row - tree.offset) as u16,
+            y: area.y + (index - *offset) as u16,
             height: 1,
             ..area
         };
-        let node = &tree.nodes[index];
-        let mut line = if node.dir {
-            let mut line = icons::folder_label(&node.name, node.expanded);
-            let marker = if node.expanded { EXPANDED } else { COLLAPSED };
-            line.spans.insert(0, Span::raw(marker));
-            line
-        } else {
-            icons::file_label(&node.name)
-        };
-        line.spans.insert(
-            0,
-            Span::styled(guides[index].clone(), Style::new().fg(theme::BORDER)),
-        );
-        let style = if tree.cursor == Some(index) {
+        let style = if cursor == Some(index) && focused {
             Style::new()
                 .fg(theme::TEXT)
                 .bg(theme::FOCUSED_SELECTION)
                 .add_modifier(Modifier::BOLD)
+        } else if cursor == Some(index) {
+            Style::new().fg(theme::TEXT).bg(theme::INACTIVE_SELECTION)
         } else {
             Style::new().fg(theme::TEXT).bg(theme::SURFACE)
         };
-        buf.set_style(rect, style);
-        line.style(style).render(rect, buf);
-        hits.push((rect, Target::FileRow(row)));
+        // Render the whole row off screen, then copy the visible window.
+        let full = Rect::new(
+            0,
+            0,
+            (width.max(*scroll_x + window_x)).min(u16::MAX as usize) as u16,
+            1,
+        );
+        let mut row = Buffer::empty(full);
+        line.style(style).render(full, &mut row);
+        let start = (*scroll_x).min((full.width - rect.width) as usize) as u16;
+        for dx in 0..rect.width {
+            let mut cell = row[(start + dx, 0)].clone();
+            // A wide glyph cut by either edge shows as a blank cell.
+            let cut = if dx + 1 == rect.width {
+                cell.symbol().width() > 1
+            } else {
+                dx == 0 && cell.symbol().is_empty()
+            };
+            if cut {
+                cell.set_symbol(" ");
+            }
+            buf[(rect.x + dx, rect.y)] = cell;
+        }
+        hits.push((rect, index));
     }
-    app.hits.extend(hits);
+    if let Some(bar) = vbar {
+        render_scrollbar(buf, bar, true, count, height, *offset);
+    }
+    if let Some(bar) = hbar {
+        render_scrollbar(buf, bar, false, width, window_x, *scroll_x);
+    }
+    if let (Some(v), Some(h)) = (vbar, hbar) {
+        buf[(v.x, h.y)].reset();
+        buf[(v.x, h.y)].set_bg(theme::SCROLLBAR_BACKGROUND);
+    }
+    hits
 }
 
 /// Textual's Tree expand/collapse indicators.
@@ -586,11 +656,10 @@ fn button_style(button: Button, hovered: bool, base: Style) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn bordered_list(focused: bool, rows: Vec<Line<'static>>, area: Rect, buf: &mut Buffer) {
-    let border = if focused { theme::FOCUS } else { theme::BORDER };
+fn bordered_list(rows: Vec<Line<'static>>, area: Rect, buf: &mut Buffer) {
     Paragraph::new(rows)
         .style(Style::new().fg(theme::TEXT).bg(theme::SURFACE))
-        .block(Block::bordered().border_style(Style::new().fg(border)))
+        .block(Block::bordered().border_style(Style::new().fg(theme::BORDER)))
         .render(area, buf);
 }
 
@@ -700,13 +769,7 @@ fn render_shortcuts(app: &mut App, area: Rect, buf: &mut Buffer) {
         width: BUTTON_WIDTH.min(button.width),
         ..button
     };
-    dialog_button(
-        "Close",
-        Style::new().fg(theme::TEXT).bg(theme::FOCUSED_SELECTION),
-        true,
-        close,
-        buf,
-    );
+    dialog_button("Close", false, true, close, buf);
     app.hits.push((close, Target::CloseShortcuts));
 }
 
@@ -753,20 +816,8 @@ fn render_discard(
         Constraint::Length(BUTTON_WIDTH),
     ])
     .areas(buttons);
-    dialog_button(
-        "Cancel",
-        Style::new().fg(theme::TEXT).bg(theme::INACTIVE_SELECTION),
-        !confirm,
-        cancel,
-        buf,
-    );
-    dialog_button(
-        "Discard",
-        Style::new().fg(theme::CANVAS).bg(theme::DANGER),
-        confirm,
-        discard,
-        buf,
-    );
+    dialog_button("Cancel", false, !confirm, cancel, buf);
+    dialog_button("Discard", true, confirm, discard, buf);
     app.hits.push((cancel, Target::CancelDiscard));
     app.hits.push((discard, Target::ConfirmDiscard));
 }
@@ -775,10 +826,11 @@ fn render_discard(
 const BUTTON_WIDTH: u16 = 16;
 
 /// A Textual-style button in `area` (three rows): a bold centered label between
-/// a lighter `▔` top edge and a darker `▁` bottom edge; focus reverses the label.
-fn dialog_button(label: &str, style: Style, focused: bool, area: Rect, buf: &mut Buffer) {
-    let background = style.bg.unwrap_or(theme::SURFACE);
-    let shade = |amount: f32| match background {
+/// a lighter `▔` top edge and a darker `▁` bottom edge. A default button is a
+/// `$surface` block, or a `$primary` one with a white label while focused. A
+/// `danger` (error variant) button stays red and lightens slightly while focused.
+fn dialog_button(label: &str, danger: bool, focused: bool, area: Rect, buf: &mut Buffer) {
+    let shade = |background: Color, amount: f32| match background {
         Color::Rgb(r, g, b) => {
             let mix = |c: u8| {
                 let target = if amount > 0.0 { 255.0 } else { 0.0 };
@@ -788,6 +840,13 @@ fn dialog_button(label: &str, style: Style, focused: bool, area: Rect, buf: &mut
         }
         other => other,
     };
+    let (foreground, background) = match (danger, focused) {
+        (true, false) => (theme::CANVAS, theme::DANGER),
+        (true, true) => (theme::CANVAS, shade(theme::DANGER, 0.1)),
+        (false, false) => (theme::TEXT, theme::SURFACE),
+        (false, true) => (Color::Rgb(255, 255, 255), theme::PRIMARY),
+    };
+    let style = Style::new().fg(foreground).bg(background);
     buf.set_style(area, style);
     let [top, middle, bottom] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
     let edge = |symbol: &str, color: Color, row: Rect, buf: &mut Buffer| {
@@ -798,13 +857,9 @@ fn dialog_button(label: &str, style: Style, focused: bool, area: Rect, buf: &mut
             buf[(x, row.y)].set_symbol(symbol).set_fg(color);
         }
     };
-    edge("▔", shade(0.3), top, buf);
-    edge("▁", shade(-0.3), bottom, buf);
-    let mut label_style = style.add_modifier(Modifier::BOLD);
-    if focused {
-        label_style = label_style.add_modifier(Modifier::REVERSED);
-    }
-    Line::styled(format!(" {label} "), label_style)
+    edge("▔", shade(background, 0.3), top, buf);
+    edge("▁", shade(background, -0.3), bottom, buf);
+    Line::styled(format!(" {label} "), style.add_modifier(Modifier::BOLD))
         .centered()
         .render(middle, buf);
 }

@@ -160,16 +160,21 @@ fn clicking_tabs_and_panes_moves_focus() {
 }
 
 #[test]
-fn focused_list_border_uses_a_distinct_color() {
+fn focus_shows_in_the_highlighted_row_not_the_border() {
     let mut harness = Harness::new(Ok(state(&["a.txt"], &["b.txt"])));
-    let (_, staged_row) = harness.at("a.txt");
+    let (x, staged_row) = harness.at("a.txt");
     let (_, unstaged_row) = harness.at("b.txt");
-    let border = |harness: &Harness, row: u16| harness.buffer()[(0, row)].fg;
-    let focused = border(&harness, staged_row);
-    assert_ne!(focused, border(&harness, unstaged_row));
+    let cell = |harness: &Harness, pos: (u16, u16)| harness.buffer()[pos].clone();
+    let border = cell(&harness, (0, staged_row)).fg;
+    let focused_row = cell(&harness, (x, staged_row)).bg;
+    harness.press(KeyCode::Down);
     harness.press(KeyCode::Tab);
-    assert_eq!(border(&harness, unstaged_row), focused);
-    assert_ne!(border(&harness, staged_row), focused);
+    harness.press(KeyCode::Down);
+    // Like Python, the border keeps one color; the focused list's row stands out.
+    assert_eq!(cell(&harness, (0, staged_row)).fg, border);
+    assert_eq!(cell(&harness, (0, unstaged_row)).fg, border);
+    assert_eq!(cell(&harness, (x, unstaged_row)).bg, focused_row);
+    assert_ne!(cell(&harness, (x, staged_row)).bg, focused_row);
 }
 
 #[test]
@@ -242,6 +247,19 @@ fn close_button_is_a_three_row_textual_button() {
     assert_eq!(row(y - 1), "▔".repeat(16));
     assert_eq!(row(y), "     Close      ");
     assert_eq!(row(y + 1), "▁".repeat(16));
+    // A solid block: the label row has the edges' background, with a bold,
+    // unreversed label.
+    let buffer = harness.buffer();
+    let background = buffer[(left, y - 1)].bg;
+    for dx in 0..16 {
+        for dy in [y - 1, y, y + 1] {
+            assert_eq!(buffer[(left + dx, dy)].bg, background, "({dx}, {dy})");
+        }
+    }
+    let label = &buffer[(x, y)];
+    assert!(label.modifier.contains(Modifier::BOLD));
+    assert!(!label.modifier.contains(Modifier::REVERSED));
+    assert_ne!(label.fg, background);
     // The whole button is clickable, edges included.
     harness.click((left, y + 1));
     assert!(!shortcuts_open(&harness));
@@ -549,14 +567,15 @@ fn unchanged_history_keeps_the_tree_and_changed_history_keeps_the_cursor_commit(
     // Same commits: expansion, files, and cursor stay.
     harness.press(KeyCode::Char('r'));
     assert!(harness.find("M b.txt").is_some());
-    let (x, y) = harness.at("M b.txt");
-    assert!(harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+    // The cursor row stands out from the other rows.
+    let plain = harness.buffer()[harness.at("First")].bg;
+    assert_ne!(harness.buffer()[harness.at("M b.txt")].bg, plain);
 
     // New commits: rebuilt collapsed, cursor on the file's commit.
     with_history(&mut harness, &[commit("ccccccc0", "Newest"), first, second]);
     assert!(harness.find("M b.txt").is_none());
-    let (x, y) = harness.at("▶ Second");
-    assert!(harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+    let plain = harness.buffer()[harness.at("Newest")].bg;
+    assert_ne!(harness.buffer()[harness.at("▶ Second")].bg, plain);
 }
 
 #[test]

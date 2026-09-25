@@ -24,3 +24,8 @@ pub fn title() -> Style {
         .bg(RAISED_SURFACE)
         .add_modifier(Modifier::BOLD)
 }
+
+/// Scrollbar thumb: the Python app's `scrollbar-color: $accent`.
+pub const SCROLLBAR: Color = ACCENT;
+/// Scrollbar track: dark, like Textual's `background-darken-1`.
+pub const SCROLLBAR_BACKGROUND: Color = CANVAS;

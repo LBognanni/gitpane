@@ -11,6 +11,8 @@ use crate::theme;
 
 const TAB: usize = 8;
 const WHEEL: usize = 3;
+/// Width of the vertical scrollbar, like Textual's default.
+const VBAR: u16 = 2;
 
 /// A (source row, character offset) position in the displayed row text.
 type Point = (usize, usize);
@@ -47,6 +49,60 @@ fn thumb(track: usize, virtual_size: usize, window: usize, scroll: usize) -> (us
         .checked_div(max)
         .unwrap_or(0);
     (start, len)
+}
+
+/// Whether `rows` rows up to `width` cells wide need (vertical, horizontal)
+/// scrollbars in a `w` x `h` area, counting the space each bar takes; the
+/// vertical bar is `bar` columns wide.
+fn needs_bars(w: usize, h: usize, rows: usize, width: usize, bar: usize) -> (bool, bool) {
+    let mut vertical = rows > h;
+    let horizontal = width > w.saturating_sub(bar * usize::from(vertical));
+    if horizontal && !vertical {
+        vertical = rows > h.saturating_sub(1);
+    }
+    let horizontal = width > w.saturating_sub(bar * usize::from(vertical));
+    (vertical, horizontal)
+}
+
+/// Split `area` into content and the (vertical, horizontal) scrollbars needed
+/// to show `rows` rows up to `width` cells wide, with a one-column vertical bar.
+pub fn scrollbar_layout(
+    area: Rect,
+    rows: usize,
+    width: usize,
+) -> (Rect, Option<Rect>, Option<Rect>) {
+    let (vertical, horizontal) =
+        needs_bars(area.width as usize, area.height as usize, rows, width, 1);
+    let content_w = area.width.saturating_sub(u16::from(vertical));
+    let content_h = area.height.saturating_sub(u16::from(horizontal));
+    (
+        Rect::new(area.x, area.y, content_w, content_h),
+        vertical.then(|| Rect::new(area.x + content_w, area.y, 1, content_h)),
+        horizontal.then(|| Rect::new(area.x, area.y + content_h, content_w, 1)),
+    )
+}
+
+/// Draw a scrollbar track in `bar` for a `window` onto `size` scrolled to `scroll`.
+pub fn render_scrollbar(
+    buf: &mut Buffer,
+    bar: Rect,
+    vertical: bool,
+    size: usize,
+    window: usize,
+    scroll: usize,
+) {
+    let track = if vertical { bar.height } else { bar.width } as usize;
+    let (start, len) = thumb(track, size, window, scroll);
+    for (x, y) in bar.positions().map(|p| (p.x, p.y)) {
+        let i = if vertical { y - bar.y } else { x - bar.x } as usize;
+        let color = if (start..start + len).contains(&i) {
+            theme::SCROLLBAR
+        } else {
+            theme::SCROLLBAR_BACKGROUND
+        };
+        buf[(x, y)].reset();
+        buf[(x, y)].set_style(Style::new().bg(color));
+    }
 }
 
 fn char_width(c: char) -> usize {
@@ -367,8 +423,8 @@ impl CodeView {
         });
         let mut width = w;
         let (mut visual, mut first_visual) = self.build(Some(width));
-        if visual.len() > h && w > 1 {
-            width = w - 1;
+        if visual.len() > h && w > VBAR as usize {
+            width = w - VBAR as usize;
             (visual, first_visual) = self.build(Some(width));
         }
         self.visual = visual;
@@ -407,19 +463,19 @@ impl CodeView {
                 (self.visual, self.first_visual) = self.build(None);
                 self.index_width = Some(0);
             }
-            let rows = self.visual.len();
-            let mut vertical = rows > h;
-            let horizontal = self.max_width > w - usize::from(vertical).min(w);
-            if horizontal && !vertical {
-                vertical = rows > h.saturating_sub(1);
-            }
-            let horizontal = self.max_width > w - usize::from(vertical).min(w);
-            (vertical, horizontal)
+            needs_bars(w, h, self.visual.len(), self.max_width, VBAR as usize)
         };
-        let content_w = area.width.saturating_sub(u16::from(vertical));
+        let content_w = area.width.saturating_sub(VBAR * u16::from(vertical));
         let content_h = area.height.saturating_sub(u16::from(horizontal));
         self.content = Rect::new(area.x, area.y, content_w, content_h);
-        self.vbar = vertical.then(|| Rect::new(area.x + content_w, area.y, 1, content_h));
+        self.vbar = vertical.then(|| {
+            Rect::new(
+                area.x + content_w,
+                area.y,
+                area.width - content_w,
+                content_h,
+            )
+        });
         self.hbar = horizontal.then(|| Rect::new(area.x, area.y + content_h, content_w, 1));
         if self.wrapped {
             self.scroll_x = 0;
@@ -678,8 +734,10 @@ impl CodeView {
             self.render_bar(buf, bar, false);
         }
         if let (Some(v), Some(h)) = (self.vbar, self.hbar) {
-            buf[(v.x, h.y)].reset();
-            buf[(v.x, h.y)].set_style(Style::new().bg(theme::RAISED_SURFACE));
+            for x in v.x..v.right() {
+                buf[(x, h.y)].reset();
+                buf[(x, h.y)].set_style(Style::new().bg(theme::SCROLLBAR_BACKGROUND));
+            }
         }
     }
 
@@ -698,22 +756,8 @@ impl CodeView {
     }
 
     fn render_bar(&self, buf: &mut Buffer, bar: Rect, vertical: bool) {
-        let (track, size, window, scroll) = self.axis(vertical);
-        let (start, len) = thumb(track, size, window, scroll);
-        for i in 0..track {
-            let (x, y) = if vertical {
-                (bar.x, bar.y + i as u16)
-            } else {
-                (bar.x + i as u16, bar.y)
-            };
-            let color = if (start..start + len).contains(&i) {
-                theme::BORDER
-            } else {
-                theme::RAISED_SURFACE
-            };
-            buf[(x, y)].reset();
-            buf[(x, y)].set_style(Style::new().bg(color));
-        }
+        let (_, size, window, scroll) = self.axis(vertical);
+        render_scrollbar(buf, bar, vertical, size, window, scroll);
     }
 }
 
@@ -849,16 +893,17 @@ mod tests {
         view.set_document(doc(&lines.iter().map(String::as_str).collect::<Vec<_>>()));
         let buffer = draw(&mut view, 5, 2);
         assert_eq!(view.virtual_size(), (12, 4));
-        assert_eq!(&line(&buffer, 0)[..4], "0ABC");
+        assert_eq!(&line(&buffer, 0)[..3], "0AB");
 
         let buffer = draw(&mut view, 8, 3);
         assert_eq!(view.virtual_size(), (12, 4));
-        assert_eq!(&line(&buffer, 0)[..7], "0ABCDEF");
+        // Six text columns, then the two-column vertical scrollbar.
+        assert_eq!(line(&buffer, 0), "0ABCDE  ");
 
         view.scroll_to(3, 1);
         let buffer = draw(&mut view, 8, 3);
         assert_eq!(view.scroll_offset(), (3, 1));
-        assert_eq!(&line(&buffer, 0)[..7], "CDEFGHI");
+        assert_eq!(&line(&buffer, 0)[..6], "CDEFGH");
     }
 
     #[test]
@@ -931,7 +976,7 @@ mod tests {
         view.set_document(doc(&vec![ys.as_str(); 100]));
         let buffer = draw(&mut view, 8, 3);
         assert_eq!(view.virtual_size(), (40, 100));
-        assert!(lines(&buffer, 7, 2).iter().all(|row| row == &"y".repeat(7)));
+        assert!(lines(&buffer, 6, 2).iter().all(|row| row == &"y".repeat(6)));
     }
 
     #[test]
@@ -942,13 +987,13 @@ mod tests {
         draw(&mut view, 8, 3);
         view.scroll_to(20, 50);
         let buffer = draw(&mut view, 8, 3);
-        assert!(lines(&buffer, 7, 2).iter().all(|row| row == &"x".repeat(7)));
+        assert!(lines(&buffer, 6, 2).iter().all(|row| row == &"x".repeat(6)));
 
         view.set_document(numbered(100, &suffix));
         let buffer = draw(&mut view, 8, 3);
         assert_eq!(view.scroll_offset(), (0, 0));
         assert_eq!(view.max_scroll().1, 100 - view.viewport().height as usize);
-        assert_eq!(lines(&buffer, 7, 2), ["000xxxx", "001xxxx"]);
+        assert_eq!(lines(&buffer, 6, 2), ["000xxx", "001xxx"]);
     }
 
     #[test]
@@ -997,6 +1042,32 @@ mod tests {
         assert_eq!(view.scroll_offset().1, max_y);
         view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), bar, 0));
         assert_eq!(view.scroll_offset().1, 0);
+    }
+
+    #[test]
+    fn vertical_scrollbar_is_two_columns_wide_and_both_respond() {
+        let mut view = CodeView::new();
+        view.set_document(numbered(30, ""));
+        let buffer = draw(&mut view, 10, 4);
+        assert_eq!(view.viewport().width, 8);
+        let thumb = buffer[(8, 0)].bg;
+        assert_eq!(buffer[(9, 0)].bg, thumb);
+        assert_ne!(buffer[(8, 3)].bg, thumb, "the track below the thumb");
+        for column in [8, 9] {
+            view.scroll_to(0, 0);
+            view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, 3));
+            assert_eq!(
+                view.scroll_offset().1,
+                view.max_scroll().1,
+                "column {column}"
+            );
+            view.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, 3));
+            // Drag the thumb from the bottom back to the top.
+            view.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, 3));
+            view.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), column, 0));
+            view.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, 0));
+            assert_eq!(view.scroll_offset().1, 0, "column {column}");
+        }
     }
 
     #[test]
