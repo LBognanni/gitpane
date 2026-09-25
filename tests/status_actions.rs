@@ -413,3 +413,16 @@ fn status_failure_after_a_refresh_clears_loading() {
     assert!(!screen.contains("Loading…"));
     assert!(screen.contains("Could not refresh status"));
 }
+
+#[test]
+fn hovering_discard_dialog_buttons_lightens_them() {
+    let mut harness = Harness::new(Ok(state(&[], &["a.txt"])));
+    harness.press(KeyCode::Char('d'));
+    for button in [harness.at("Cancel"), discard_button(&harness)] {
+        let before = harness.buffer()[button].bg;
+        harness.hover(button);
+        assert_ne!(harness.buffer()[button].bg, before);
+        harness.hover((0, 0));
+        assert_eq!(harness.buffer()[button].bg, before);
+    }
+}

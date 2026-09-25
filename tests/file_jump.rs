@@ -389,3 +389,18 @@ fn dragging_the_results_scrollbar_thumb_scrolls_without_choosing() {
     }
     assert_eq!(harness.buffer()[harness.at("match-000.txt")].bg, highlight);
 }
+
+#[test]
+fn closing_the_dialog_mid_drag_releases_the_results_thumb() {
+    let (mut harness, bar, top) = jump_with(60, "match");
+    harness.mouse_down((bar, top));
+    harness.press(KeyCode::Esc);
+    harness.press(KeyCode::Char('t'));
+    type_text(&mut harness, "match");
+    harness.hover((0, top + 40));
+    assert!(
+        harness.find("match-000.txt").is_some(),
+        "{}",
+        harness.screen()
+    );
+}
