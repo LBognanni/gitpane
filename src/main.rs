@@ -9,6 +9,10 @@ use gitpane::git::{CliGit, SystemRunner};
 use gitpane::runtime;
 
 fn main() -> io::Result<ExitCode> {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("gitpane {}", env!("CARGO_PKG_VERSION"));
+        return Ok(ExitCode::SUCCESS);
+    }
     let git = CliGit::new(SystemRunner);
     let cwd = std::env::current_dir()?;
     let root = match git.repo_root(&cwd) {

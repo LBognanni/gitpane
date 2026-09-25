@@ -52,6 +52,8 @@ and a plugin or configuration system.
 | Tooltips | Shown in the status bar while hovering an icon button | Floating tooltips need timers and overlay placement; the status bar is simpler and still discoverable. |
 | Clipboard | OSC 52 | Works in modern terminals and over SSH, with no system clipboard dependency. |
 | Reference code | gitu (tree-sitter diff highlighting), gitui (ratatui git client) | Borrow ideas, not code wholesale; both have a different UX. |
+| Distribution | Prebuilt binaries on GitHub Releases (`.github/workflows/release.yml`): a `v*` tag makes a release, a push to any other branch than `main` makes a `vX.Y.Z-beta.N` prerelease. Installed by `install.sh` via `curl … \| sh`; each release's installer defaults to that release. `gitpane --version` | Users need no Rust toolchain. Hand-written instead of cargo-dist: two short files, nothing generated. |
+| Targets | Static musl binaries for x86_64 and aarch64 Linux; native aarch64 and x86_64 macOS; no Windows yet | One Linux binary runs on any distro. If musl's allocator ever shows up in profiles, add mimalloc for musl builds only. Windows has never been run (`/dev/null` in git calls). |
 
 ## 3. Development environment
 
@@ -1363,14 +1365,26 @@ reports failures once per streak.
 > before continuing.
 >
 > Then remove `gitpane/`, the Python tests, `pyproject.toml`, and `uv.lock`, and
-> rewrite `README.md` (requirements, `cargo install --path .`, controls) and
-> the testing rules in `AGENTS.md` for Rust.
+> rewrite the testing rules in `AGENTS.md` for Rust. Rewrite `README.md`:
+>
+> - Requirements: Git and a Nerd Font.
+> - Install: `curl -fsSL https://github.com/LBognanni/gitpane/releases/latest/download/install.sh | sh`
+>   (`GITPANE_VERSION` and `GITPANE_INSTALL_DIR` override the release and the
+>   default `~/.local/bin`). From source:
+>   `cargo install --locked --git https://github.com/LBognanni/gitpane`.
+> - Upgrading from the Python version: run `uv tool uninstall gitpane` first.
+> - Controls.
+> - Releasing: bump the version in `Cargo.toml`, commit, then tag `vX.Y.Z` and
+>   push the tag. Every push to a branch other than `main` publishes a beta
+>   prerelease; install one with
+>   `curl -fsSL https://github.com/LBognanni/gitpane/releases/download/<tag>/install.sh | sh`.
 >
 > Make the devcontainer work from the main checkout: `workspaceFolder` becomes
 > `${localWorkspaceFolder}`, and `up.sh` uses the repository root.
 >
 > Update the status table and completion notes in this document. The merge to
-> `main` is done by the orchestrator after user approval.
+> `main` is done by the orchestrator after user approval. After the merge, tag
+> and push `v0.1.0` as the first release.
 
 **Target paths:** repository-wide deletions, `README.md`, `AGENTS.md`,
 `.devcontainer/*`, `docs/rust.md`.
