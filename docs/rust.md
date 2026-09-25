@@ -1398,7 +1398,7 @@ rewrite, is among the simpler parts.
 | RS-S3 — Diff and highlighting | Done | RS-S2 | Parser, tree-sitter viewport highlighting, documents |
 | RS-S4 — CodeView | Done | RS-S3 | Virtual viewer with wrap, scrollbars, selection |
 | RS-S5 — Application shell | Done | RS-S4 | Layout, focus, hit map, toasts, modals, shortcuts |
-| RS-S6 — Resizable layout | Not started | RS-S5 | Splitters on both tabs |
+| RS-S6 — Resizable layout | Done | RS-S5 | Splitters on both tabs |
 | RS-S7 — Changes lists and actions | Not started | RS-S6 | Status lists, actions, git queue |
 | RS-S8 — Diff pane | Not started | RS-S7 | Highlighted diffs and change navigation |
 | RS-S9 — History | Not started | RS-S8 | Commit tree and historical diffs |
