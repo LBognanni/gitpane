@@ -654,9 +654,15 @@ pub struct App {
     pub hits: Vec<(Rect, Target)>,
     pub panes: Panes,
     pub drag: Option<Drag>,
-    /// A dragged scrollbar thumb (a list or tree, or the jump results when
-    /// `None`) and where it was grabbed.
-    thumb: Option<(Option<Focus>, Scrollbar, usize)>,
+    /// A dragged scrollbar thumb, its owner, and where it was grabbed.
+    thumb: Option<(ThumbOwner, Scrollbar, usize)>,
+}
+
+/// Whose scrollbar thumb is being dragged.
+#[derive(Clone, Copy)]
+enum ThumbOwner {
+    List(Focus),
+    Jump,
 }
 
 impl App {
@@ -1183,6 +1189,7 @@ impl App {
         let effects = self.handle(event);
         if (self.tab, self.modal.clone()) != before {
             self.hover = None;
+            self.thumb = None;
         }
         effects
     }
@@ -1656,8 +1663,8 @@ impl App {
                 MouseEventKind::Drag(_) | MouseEventKind::Moved => {
                     let value = bar.drag(Position::new(mouse.column, mouse.row), grab);
                     match focus {
-                        Some(focus) => self.set_list_scroll(focus, bar.vertical, value),
-                        None => self.jump_offset = value,
+                        ThumbOwner::List(focus) => self.set_list_scroll(focus, bar.vertical, value),
+                        ThumbOwner::Jump => self.jump_offset = value,
                     }
                 }
                 _ => {}
@@ -1714,14 +1721,16 @@ impl App {
                     self.focus = focus;
                     let pos = Position::new(mouse.column, mouse.row);
                     match bar.press(pos, self.list_scroll(focus, bar.vertical)) {
-                        Press::Grab(grab) => self.thumb = Some((Some(focus), bar, grab)),
+                        Press::Grab(grab) => {
+                            self.thumb = Some((ThumbOwner::List(focus), bar, grab))
+                        }
                         Press::Jump(value) => self.set_list_scroll(focus, bar.vertical, value),
                     }
                 }
                 Some(Target::JumpScrollbar(bar)) => {
                     let pos = Position::new(mouse.column, mouse.row);
                     match bar.press(pos, self.jump_offset) {
-                        Press::Grab(grab) => self.thumb = Some((None, bar, grab)),
+                        Press::Grab(grab) => self.thumb = Some((ThumbOwner::Jump, bar, grab)),
                         Press::Jump(value) => self.jump_offset = value,
                     }
                 }

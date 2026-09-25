@@ -576,12 +576,12 @@ fn tree_rows(
         for dx in 0..rect.width {
             let mut cell = row[(start + dx, 0)].clone();
             // A wide glyph cut by either edge shows as a blank cell.
-            let cut = if dx + 1 == rect.width {
-                cell.symbol().width() > 1
-            } else {
-                dx == 0 && cell.symbol().is_empty()
-            };
-            if cut {
+            // Ratatui resets a wide glyph's hidden cell, dropping its style,
+            // so a left cut takes the glyph's cell instead.
+            if dx == 0 && start > 0 && row[(start - 1, 0)].symbol().width() > 1 {
+                cell = row[(start - 1, 0)].clone();
+                cell.set_symbol(" ");
+            } else if dx + 1 == rect.width && cell.symbol().width() > 1 {
                 cell.set_symbol(" ");
             }
             buf[(rect.x + dx, rect.y)] = cell;
@@ -606,7 +606,10 @@ fn tree_rows(
     }
     if let (Some(v), Some(h)) = (vbar, hbar) {
         buf[(v.x, h.y)].reset();
-        buf[(v.x, h.y)].set_bg(theme::SCROLLBAR_BACKGROUND);
+        buf[(v.x, h.y)]
+            .set_symbol("▄")
+            .set_fg(theme::SCROLLBAR_BACKGROUND)
+            .set_bg(theme::SURFACE);
     }
     hits
 }

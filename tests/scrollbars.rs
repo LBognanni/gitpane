@@ -311,3 +311,33 @@ fn a_thumb_drag_outside_the_bar_keeps_scrolling_and_selects_nothing() {
     harness.hover((x, top));
     assert!(harness.find("file39.txt").is_some());
 }
+
+#[test]
+fn a_wide_glyph_cut_by_the_left_edge_keeps_the_cursor_row_background() {
+    let mut harness = Harness::new(Ok(state(&[], &[])));
+    let commits = vec![Commit {
+        hash: "a".repeat(40),
+        short_hash: "a".repeat(7),
+        parent: None,
+        subject: format!("commit{}", "🐛".repeat(40)),
+    }];
+    *harness.git.commits.lock().unwrap() = Ok(commits);
+    harness.press(KeyCode::Char('r'));
+    let (x, y) = harness.at("commit🐛");
+    harness.click((x, y));
+    let cursor = bg(&harness, (x, y));
+    let left = (0..x)
+        .rev()
+        .find(|&c| harness.line(y).chars().nth(c as usize) == Some('│'))
+        .unwrap()
+        + 1;
+    // Wheel steps of three cells cut a glyph on one of two neighbouring steps.
+    let mut cut = false;
+    for _ in 0..8 {
+        harness.scroll(MouseEventKind::ScrollRight, (x, y));
+        let cell = &harness.buffer()[(left, y)];
+        assert_eq!(cell.bg, cursor, "{}", harness.screen());
+        cut |= cell.symbol() == " ";
+    }
+    assert!(cut, "{}", harness.screen());
+}
