@@ -253,7 +253,7 @@ fn s_stages_or_unstages_the_highlighted_row() {
     harness.press(KeyCode::Char('j'));
     harness.press(KeyCode::Char('s'));
     assert_eq!(
-        harness.git.calls()[1..],
+        harness.git.calls()[2..],
         [
             "unstage a.txt",
             "status /repo",

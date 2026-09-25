@@ -10,7 +10,8 @@ use gitpane::runtime;
 
 fn main() -> io::Result<ExitCode> {
     let git = CliGit::new(SystemRunner);
-    let root = match git.repo_root(&std::env::current_dir()?) {
+    let cwd = std::env::current_dir()?;
+    let root = match git.repo_root(&cwd) {
         Ok(root) => root,
         Err(error) => {
             eprintln!("{error}");
@@ -18,7 +19,7 @@ fn main() -> io::Result<ExitCode> {
         }
     };
     let show_shortcuts = runtime::default_marker().is_none_or(|m| runtime::claim_first_launch(&m));
-    let app = App::new(root, show_shortcuts);
+    let app = App::new(root, cwd, show_shortcuts);
 
     let mut terminal = ratatui::init();
     let restore = std::panic::take_hook();

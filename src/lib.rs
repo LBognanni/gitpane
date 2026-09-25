@@ -4,6 +4,7 @@ pub mod diff;
 pub mod document;
 pub mod git;
 pub mod highlight;
+pub mod icons;
 pub mod layout;
 pub mod model;
 pub mod runtime;

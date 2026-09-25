@@ -61,6 +61,8 @@ pub struct FakeGit {
     pub commits: Mutex<Result<Vec<Commit>, GitError>>,
     /// Files per commit hash; missing commits have no files.
     pub commit_files: Mutex<HashMap<String, Vec<CommitFile>>>,
+    /// Paths listed by `files`, relative to the launch directory.
+    pub files: Mutex<Result<Vec<String>, GitError>>,
     pub calls: Mutex<Vec<String>>,
     gate: Option<Gate>,
 }
@@ -73,6 +75,7 @@ impl FakeGit {
             diffs: Mutex::new(HashMap::new()),
             commits: Mutex::new(Ok(Vec::new())),
             commit_files: Mutex::new(HashMap::new()),
+            files: Mutex::new(Ok(Vec::new())),
             calls: Mutex::new(Vec::new()),
             gate: None,
         }
@@ -124,8 +127,9 @@ impl GitApi for FakeGit {
         self.record(format!("status {}", root.display()));
         self.status.lock().unwrap().clone()
     }
-    fn files(&self, _: &Path) -> Result<Vec<String>, GitError> {
-        Ok(Vec::new())
+    fn files(&self, cwd: &Path) -> Result<Vec<String>, GitError> {
+        self.record(format!("files {}", cwd.display()));
+        self.files.lock().unwrap().clone()
     }
     fn commits(&self, _: &Path) -> Result<Vec<Commit>, GitError> {
         self.commits.lock().unwrap().clone()
@@ -172,6 +176,9 @@ pub struct Harness {
     pub hold_history: bool,
     /// Held history and commit-file jobs, kept apart from the Git queue's.
     pub held_history: VecDeque<Job>,
+    /// When true, file-list and preview jobs wait in `held_files`.
+    pub hold_files: bool,
+    pub held_files: VecDeque<Job>,
     /// Text copied to the clipboard, in order.
     pub copied: Vec<String>,
     terminal: Terminal<TestBackend>,
@@ -197,6 +204,17 @@ impl Harness {
         Self::start(status, false, 100, 30, true)
     }
 
+    /// Start at 100x30 in repository `root`, launched from `cwd`, serving `files`.
+    pub fn launched(root: &Path, cwd: &Path, files: &[&str]) -> Self {
+        let git = FakeGit::new(Ok(RepoState {
+            root: root.to_path_buf(),
+            ..state(&[], &[])
+        }));
+        *git.files.lock().unwrap() = Ok(files.iter().map(|f| f.to_string()).collect());
+        let app = App::new(root.to_path_buf(), cwd.to_path_buf(), false);
+        Self::launch(app, git, 100, 30, false)
+    }
+
     fn start(
         status: Result<RepoState, GitError>,
         show_shortcuts: bool,
@@ -204,15 +222,21 @@ impl Harness {
         height: u16,
         hold: bool,
     ) -> Self {
-        let app = App::new(PathBuf::from(ROOT), show_shortcuts);
+        let app = App::new(PathBuf::from(ROOT), PathBuf::from(ROOT), show_shortcuts);
+        Self::launch(app, FakeGit::new(status), width, height, hold)
+    }
+
+    fn launch(app: App, git: FakeGit, width: u16, height: u16, hold: bool) -> Self {
         let mut harness = Self {
             app,
-            git: FakeGit::new(status),
+            git,
             quit: false,
             hold,
             held: VecDeque::new(),
             hold_history: false,
             held_history: VecDeque::new(),
+            hold_files: hold,
+            held_files: VecDeque::new(),
             copied: Vec::new(),
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
         };
@@ -233,9 +257,18 @@ impl Harness {
                 {
                     self.held_history.push_back(job)
                 }
+                Effect::Git(job @ (Job::Files { .. } | Job::Preview { .. })) if self.hold_files => {
+                    self.held_files.push_back(job)
+                }
                 Effect::Git(job)
                     if self.hold
-                        && !matches!(job, Job::History { .. } | Job::CommitFiles { .. }) =>
+                        && !matches!(
+                            job,
+                            Job::History { .. }
+                                | Job::CommitFiles { .. }
+                                | Job::Files { .. }
+                                | Job::Preview { .. }
+                        ) =>
                 {
                     self.held.push_back(job)
                 }
@@ -258,6 +291,12 @@ impl Harness {
     /// Run the oldest held history or commit-files job and return its result event.
     pub fn run_history(&mut self) -> Event {
         let job = self.held_history.pop_front().expect("a held history job");
+        runtime::run_job(&self.git, job)
+    }
+
+    /// Run the oldest held file-list or preview job and return its result event.
+    pub fn run_files(&mut self) -> Event {
+        let job = self.held_files.pop_front().expect("a held files job");
         runtime::run_job(&self.git, job)
     }
 

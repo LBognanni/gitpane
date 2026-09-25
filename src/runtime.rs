@@ -9,7 +9,7 @@ use std::time::Instant;
 use ratatui::DefaultTerminal;
 
 use crate::app::{Action, App, Effect, Event, Job};
-use crate::document::diff_document;
+use crate::document::{diff_document, load_preview};
 use crate::git::{GitApi, GitError};
 use crate::model::{DiffEntry, FileEntry};
 use crate::ui;
@@ -80,6 +80,14 @@ pub fn run_job(git: &dyn GitApi, job: Job) -> Event {
         } => Event::CommitFiles {
             token,
             result: git.commit_files(&root, &commit),
+        },
+        Job::Files { cwd, token } => Event::Files {
+            token,
+            result: git.files(&cwd),
+        },
+        Job::Preview { path, token } => Event::Preview {
+            token,
+            doc: load_preview(&path),
         },
     }
 }
@@ -159,6 +167,8 @@ struct Workers {
     diff: Sender<Job>,
     history: Sender<Job>,
     commit_files: Sender<Job>,
+    files: Sender<Job>,
+    preview: Sender<Job>,
 }
 
 pub fn run(terminal: &mut DefaultTerminal, git: Arc<dyn GitApi>, mut app: App) -> io::Result<()> {
@@ -168,7 +178,9 @@ pub fn run(terminal: &mut DefaultTerminal, git: Arc<dyn GitApi>, mut app: App) -
         git: spawn_git(git.clone(), tx.clone()),
         diff: spawn_latest(git.clone(), tx.clone()),
         history: spawn_latest(git.clone(), tx.clone()),
-        commit_files: spawn_latest(git, tx),
+        commit_files: spawn_latest(git.clone(), tx.clone()),
+        files: spawn_latest(git.clone(), tx.clone()),
+        preview: spawn_latest(git, tx),
     };
     terminal.draw(|frame| ui::render(&mut app, frame))?;
     if execute(app.start(), &jobs) {
@@ -220,6 +232,12 @@ fn execute(effects: Vec<Effect>, jobs: &Workers) -> bool {
             }
             Effect::Git(job @ Job::CommitFiles { .. }) => {
                 let _ = jobs.commit_files.send(job);
+            }
+            Effect::Git(job @ Job::Files { .. }) => {
+                let _ = jobs.files.send(job);
+            }
+            Effect::Git(job @ Job::Preview { .. }) => {
+                let _ = jobs.preview.send(job);
             }
             Effect::Git(job) => {
                 let _ = jobs.git.send(job);
