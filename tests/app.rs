@@ -226,6 +226,50 @@ fn shortcut_popup_opens_on_first_launch_and_with_h() {
 }
 
 #[test]
+fn close_button_is_a_three_row_textual_button() {
+    let mut harness = Harness::with(Ok(state(&[], &[])), true, 100, 30);
+    let (x, y) = harness.at("Close");
+    // Sixteen cells wide with the label centred between a ▔ top and ▁ bottom edge.
+    let left = x - 5;
+    let row = |y: u16| -> String {
+        harness
+            .line(y)
+            .chars()
+            .skip(left as usize)
+            .take(16)
+            .collect()
+    };
+    assert_eq!(row(y - 1), "▔".repeat(16));
+    assert_eq!(row(y), "     Close      ");
+    assert_eq!(row(y + 1), "▁".repeat(16));
+    // The whole button is clickable, edges included.
+    harness.click((left, y + 1));
+    assert!(!shortcuts_open(&harness));
+}
+
+#[test]
+fn tabs_have_an_underline_bar_that_follows_the_active_tab() {
+    let mut harness = Harness::new(Ok(state(&[], &[])));
+    assert!(harness.line(0).starts_with(" Changes  Files "));
+    let bar = |harness: &Harness| -> String { harness.line(1).chars().take(18).collect() };
+    assert_eq!(bar(&harness), "━━━━━━━━━╺━━━━━━━━");
+    let buffer = harness.buffer();
+    assert_ne!(
+        buffer[(0, 1)].fg,
+        buffer[(12, 1)].fg,
+        "active part is highlighted"
+    );
+
+    // Clicking the bar under Files switches tabs, and the highlight follows.
+    harness.click((12, 1));
+    assert_eq!(harness.app.tab, Tab::Files);
+    assert_eq!(bar(&harness), "━━━━━━━━╸━━━━━━━╺━");
+    let buffer = harness.buffer();
+    assert_eq!(buffer[(12, 1)].fg, buffer[(9, 1)].fg);
+    assert_ne!(buffer[(0, 1)].fg, buffer[(12, 1)].fg);
+}
+
+#[test]
 fn shortcut_popup_is_absent_when_not_first_launch() {
     let harness = Harness::new(Ok(state(&[], &[])));
     assert!(!shortcuts_open(&harness));
@@ -381,13 +425,13 @@ fn commit_selection_expands_files_and_file_selection_uses_shared_diff() {
         ),
     );
     with_history(&mut harness, std::slice::from_ref(&added));
-    assert!(harness.find("▸ Add history abc1234").is_some());
+    assert!(harness.find("▶ Add history abc1234").is_some());
     assert_eq!(harness.line(29).trim(), "Branch: [bold]feature");
 
     // Clicking a commit expands it and loads its files lazily.
     harness.click(harness.at("Add history"));
     assert_eq!(harness.app.focus, Focus::Commits);
-    assert!(harness.find("▾ Add history").is_some());
+    assert!(harness.find("▼ Add history").is_some());
     assert!(harness.find("M [bold]report.txt").is_some());
     let loads = |harness: &Harness| {
         harness
@@ -440,9 +484,9 @@ fn commit_tree_keys_move_expand_collapse_and_select() {
 
     harness.press(KeyCode::Char('j'));
     harness.press(KeyCode::Right);
-    assert!(harness.find("▾ Second").is_some());
+    assert!(harness.find("▼ Second").is_some());
     harness.press(KeyCode::Left);
-    assert!(harness.find("▸ Second").is_some());
+    assert!(harness.find("▶ Second").is_some());
     assert!(harness.find("M b.txt").is_none());
     harness.press(KeyCode::Enter);
     harness.press(KeyCode::Down);
@@ -511,7 +555,7 @@ fn unchanged_history_keeps_the_tree_and_changed_history_keeps_the_cursor_commit(
     // New commits: rebuilt collapsed, cursor on the file's commit.
     with_history(&mut harness, &[commit("ccccccc0", "Newest"), first, second]);
     assert!(harness.find("M b.txt").is_none());
-    let (x, y) = harness.at("▸ Second");
+    let (x, y) = harness.at("▶ Second");
     assert!(harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
 }
 
@@ -584,7 +628,7 @@ fn app_builds_file_tree_from_launch_cwd_and_refreshes_both_views() {
     let mut harness = Harness::launched(root, &cwd, &["[red]top.txt", "[directory]/example.py"]);
     harness.press(KeyCode::Char('2'));
 
-    let rows: Vec<String> = (2..5).map(|y| harness.line(y)).collect();
+    let rows: Vec<String> = (3..6).map(|y| harness.line(y)).collect();
     assert!(
         rows[0].contains("\u{e5fe} /work/repository/nested"),
         "{rows:?}"
@@ -596,10 +640,10 @@ fn app_builds_file_tree_from_launch_cwd_and_refreshes_both_views() {
 
     harness.press(KeyCode::Char('j'));
     harness.press(KeyCode::Enter);
-    assert!(harness.line(3).contains("\u{e5fe} [directory]"));
-    assert!(harness.line(4).contains("example.py"));
+    assert!(harness.line(4).contains("\u{e5fe} [directory]"));
+    assert!(harness.line(5).contains("example.py"));
     harness.press(KeyCode::Enter);
-    assert!(harness.line(3).contains("\u{e5ff} [directory]"));
+    assert!(harness.line(4).contains("\u{e5ff} [directory]"));
     assert!(harness.find("example.py").is_none());
 
     harness.press(KeyCode::Char('r'));
@@ -612,6 +656,37 @@ fn app_builds_file_tree_from_launch_cwd_and_refreshes_both_views() {
             "files /work/repository/nested",
         ]
     );
+}
+
+#[test]
+fn files_tree_indents_with_guides_and_shows_expand_indicators() {
+    let root = std::path::Path::new("/repo");
+    let mut harness = Harness::launched(root, root, &["dir/sub/deep.rs", "dir/mid.py", "top.txt"]);
+    harness.press(KeyCode::Char('2'));
+    assert!(
+        harness.line(3).contains("▼ \u{e5fe} /repo"),
+        "{}",
+        harness.screen()
+    );
+    assert!(
+        harness.line(4).contains("├─ ▶ \u{e5ff} dir"),
+        "{}",
+        harness.screen()
+    );
+    assert!(harness.line(5).contains("└─ "), "{}", harness.screen());
+    harness.press(KeyCode::Char('j'));
+    harness.press(KeyCode::Enter);
+    harness.press(KeyCode::Char('j'));
+    harness.press(KeyCode::Enter);
+    let screen = harness.screen();
+    assert!(harness.line(4).contains("├─ ▼ \u{e5fe} dir"), "{screen}");
+    assert!(harness.line(5).contains("│  ├─ ▼ \u{e5fe} sub"), "{screen}");
+    assert!(harness.line(6).contains("│  │  └─ "), "{screen}");
+    assert!(harness.line(6).contains("deep.rs"), "{screen}");
+    assert!(harness.line(7).contains("│  └─ "), "{screen}");
+    assert!(harness.line(7).contains("mid.py"), "{screen}");
+    assert!(harness.line(8).contains("└─ "), "{screen}");
+    assert!(harness.line(8).contains("top.txt"), "{screen}");
 }
 
 #[test]

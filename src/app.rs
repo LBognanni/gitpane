@@ -600,6 +600,9 @@ pub struct App {
     files_token: u64,
     /// Listed paths paired with their lowercase form, for file jump.
     search_index: Vec<(String, String)>,
+    /// First file jump result shown, and how many rows the last render showed.
+    pub jump_offset: usize,
+    pub jump_rows: usize,
     preview_token: u64,
     pub preview_loading: bool,
     pub diff_title: String,
@@ -652,6 +655,8 @@ impl App {
             files_tree_loading: false,
             files_token: 0,
             search_index: Vec::new(),
+            jump_offset: 0,
+            jump_rows: 0,
             preview_token: 0,
             preview_loading: false,
             diff_title: String::new(),
@@ -801,12 +806,25 @@ impl App {
             KeyCode::Backspace => {
                 query.pop();
                 *selected = None;
+                self.jump_offset = 0;
             }
             KeyCode::Char(c) => {
                 query.push(c);
                 *selected = None;
+                self.jump_offset = 0;
             }
             _ => {}
+        }
+        // Keep the highlighted result in view once a render has sized the list.
+        if self.jump_rows > 0
+            && let Some(Modal::FileJump {
+                selected: Some(i), ..
+            }) = self.modal
+        {
+            self.jump_offset = self
+                .jump_offset
+                .min(i)
+                .max((i + 1).saturating_sub(self.jump_rows));
         }
         Vec::new()
     }
@@ -1505,6 +1523,7 @@ impl App {
                     query: String::new(),
                     selected: None,
                 });
+                self.jump_offset = 0;
             }
             KeyCode::Char('h') => self.modal = Some(Modal::Shortcuts),
             KeyCode::Char('1') => self.show_tab(Tab::Changes),
@@ -1606,6 +1625,15 @@ impl App {
             | MouseEventKind::ScrollRight => {
                 if let Some(Target::Pane(focus @ (Focus::Diff | Focus::Preview))) = target {
                     self.view_mut(focus).handle_mouse(mouse);
+                } else if let Some(Target::JumpDialog | Target::JumpResult(_)) = target {
+                    // The wheel scrolls the results without moving the highlight.
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.jump_offset = self.jump_offset.saturating_sub(1)
+                        }
+                        MouseEventKind::ScrollDown => self.jump_offset += 1,
+                        _ => {}
+                    }
                 }
             }
             MouseEventKind::Moved => self.hover = target,

@@ -42,7 +42,7 @@ fn surfaces_and_text_are_readable() {
     let mut harness = Harness::new(Ok(state(&[], &["file0.txt", "file1.txt"])));
     let row = harness.at("file0.txt");
     let panel_title = harness.at("Unstaged");
-    let viewer_title = (40, 1);
+    let viewer_title = (40, 2);
     let diff_view = (60, 10);
     let status = harness.at("Branch");
     let splitter = (30, 10);
@@ -113,7 +113,7 @@ fn changes_layout_has_fixed_sidebar_and_right_aligned_change_buttons() {
     assert_eq!(harness.buffer()[(30, 10)].symbol(), "│");
     let (up, row) = harness.at("↑");
     let (down, _) = harness.at("↓");
-    assert_eq!(row, 1);
+    assert_eq!(row, 2);
     assert_eq!(down, up + 3);
     // Right aligned: only the bar's one-cell padding follows the buttons.
     assert_eq!(down + 2, 100 - 1);
@@ -228,7 +228,7 @@ fn diff_rows_style_additions_and_removals() {
     let mut backgrounds = Vec::new();
     for (index, marker) in ["context", "added", "removed"].into_iter().enumerate() {
         let position = harness.at(marker);
-        assert_eq!(position.1, 2 + index as u16, "{marker}");
+        assert_eq!(position.1, 3 + index as u16, "{marker}");
         assert!(cell_contrast(&harness, position) >= TEXT_FLOOR, "{marker}");
         backgrounds.push(background(&harness, position));
     }
@@ -236,8 +236,8 @@ fn diff_rows_style_additions_and_removals() {
     assert_ne!(backgrounds[0], backgrounds[2]);
     assert_ne!(backgrounds[1], backgrounds[2]);
     // The marker starts each changed row in the pane.
-    assert_eq!(harness.buffer()[(31, 3)].symbol(), "+");
-    assert_eq!(harness.buffer()[(31, 4)].symbol(), "-");
+    assert_eq!(harness.buffer()[(31, 4)].symbol(), "+");
+    assert_eq!(harness.buffer()[(31, 5)].symbol(), "-");
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn long_diff_title_keeps_navigation_visible_and_right_aligned() {
     harness.git.set_diff(&long, Ok(patch));
     harness.press(KeyCode::Enter);
 
-    let title = harness.line(1);
+    let title = harness.line(2);
     let pane: String = title.chars().skip(31).collect();
     assert!(pane.starts_with(" src/very_long_directory_name/"), "{pane}");
     assert!(!harness.screen().contains("final_file_name"));

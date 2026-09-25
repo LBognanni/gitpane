@@ -161,7 +161,7 @@ fn resizing_keeps_usable_panes_and_scrolling() {
     let ratio = sidebar_width(&harness) as f64 / diff_width(&harness) as f64;
     let heights = section_heights(&harness);
 
-    for (width, height) in [(140, 40), (80, 24), (60, 20)] {
+    for (width, height) in [(140, 40), (80, 24), (60, 21)] {
         harness.resize(width, height);
         let (sidebar, diff) = (sidebar_width(&harness), diff_width(&harness));
         assert!(sidebar >= 15 && diff >= 10, "{width}x{height}");
@@ -226,7 +226,7 @@ fn files_splitter_resizes_tree_and_preview() {
 fn splitters_render_directional_lines() {
     let harness = harness(100, 30);
     let x = sidebar_width(&harness);
-    for y in 1..29 {
+    for y in 2..29 {
         assert_eq!(harness.buffer()[(x, y)].symbol(), "│", "row {y}");
     }
     let (_, y) = section_splitter(&harness, 0);

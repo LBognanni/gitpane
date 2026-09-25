@@ -136,13 +136,13 @@ fn status_actions_support_single_bulk_and_confirmed_discard() {
     assert_eq!(harness.line(29).trim(), "Unstage Changes");
 
     // Clicking the checkbox columns checks the row without selecting it.
-    assert_eq!(sidebar_glyph(&harness, 1, '↓'), None);
+    assert_eq!(sidebar_glyph(&harness, 2, '↓'), None);
     harness.click((1, staged_row));
     assert!(harness.screen().contains("[x] M staged.txt"));
-    assert!(!harness.line(1).contains("staged.txt"));
+    assert!(!harness.line(2).contains("staged.txt"));
 
     // The bulk unstage button appears in the Staged title bar.
-    let bulk_unstage = sidebar_glyph(&harness, 1, '↓').expect("bulk unstage");
+    let bulk_unstage = sidebar_glyph(&harness, 2, '↓').expect("bulk unstage");
     harness.hover(bulk_unstage);
     assert_eq!(harness.line(29).trim(), "Unstage Selected Changes");
     let start = harness.git.calls().len();
@@ -153,7 +153,7 @@ fn status_actions_support_single_bulk_and_confirmed_discard() {
     );
     // The rebuilt lists start unchecked, so the bulk button hides again.
     assert!(harness.screen().contains("[ ] M staged.txt"));
-    assert_eq!(sidebar_glyph(&harness, 1, '↓'), None);
+    assert_eq!(sidebar_glyph(&harness, 2, '↓'), None);
 
     // Hovering an unstaged row reveals its stage action.
     let modified_row = row_of(&harness, "modified.txt");
@@ -193,6 +193,24 @@ fn status_actions_support_single_bulk_and_confirmed_discard() {
     let confirm = &harness.buffer()[discard_button(&harness)];
     assert!(cancel.modifier.contains(Modifier::REVERSED));
     assert!(!confirm.modifier.contains(Modifier::REVERSED));
+    // Both are three-row, sixteen-cell buttons with ▔ and ▁ edges.
+    let (x, y) = harness.at("Cancel");
+    let edges = |y: u16| -> String {
+        harness
+            .line(y)
+            .chars()
+            .skip(x as usize - 5)
+            .take(33)
+            .collect()
+    };
+    assert_eq!(
+        edges(y - 1),
+        format!("{} {}", "▔".repeat(16), "▔".repeat(16))
+    );
+    assert_eq!(
+        edges(y + 1),
+        format!("{} {}", "▁".repeat(16), "▁".repeat(16))
+    );
 
     harness.click(discard_button(&harness));
     assert!(!harness.screen().contains("Discard Changes?"));
@@ -268,7 +286,7 @@ fn keys_move_the_highlight_and_enter_selects() {
     let mut harness = Harness::new(Ok(state(&[], &["a.txt", "b.txt"])));
     harness.press(KeyCode::Char('j'));
     // Moving the highlight alone never selects.
-    assert!(!harness.line(1).contains("b.txt"));
+    assert!(!harness.line(2).contains("b.txt"));
     harness.press(KeyCode::Down);
     harness.press(KeyCode::Char(' '));
     assert!(harness.screen().contains("[x] M b.txt"));
@@ -277,7 +295,7 @@ fn keys_move_the_highlight_and_enter_selects() {
     harness.press(KeyCode::Char(' '));
     assert!(harness.screen().contains("[x] M a.txt"));
     harness.press(KeyCode::Enter);
-    assert!(harness.line(1).contains("a.txt"));
+    assert!(harness.line(2).contains("a.txt"));
 }
 
 #[test]
@@ -290,11 +308,11 @@ fn clicking_a_row_selects_it_and_only_checkbox_columns_toggle() {
     harness.click((3, y));
     assert!(harness.screen().contains("[ ] M b.txt"));
     assert_eq!(harness.app.focus, Focus::Unstaged);
-    assert!(!harness.line(1).contains("b.txt"));
+    assert!(!harness.line(2).contains("b.txt"));
     // Column 3 selects the row instead.
     harness.click((4, y));
     assert!(harness.screen().contains("[ ] M b.txt"));
-    assert!(harness.line(1).contains("b.txt"));
+    assert!(harness.line(2).contains("b.txt"));
     // The border is outside the row.
     harness.click((0, y));
     assert!(harness.screen().contains("[ ] M b.txt"));
@@ -329,7 +347,7 @@ fn unsupported_status_entries_are_visible_and_not_actionable() {
 
     // Clicking the checkbox columns selects it instead, showing the reason.
     harness.click((1, y));
-    assert!(harness.line(1).contains("conflict.txt"));
+    assert!(harness.line(2).contains("conflict.txt"));
     assert!(harness.screen().contains(reason));
     assert!(harness.screen().contains("[!] U conflict.txt"));
     assert_eq!(harness.git.calls().len(), start);
