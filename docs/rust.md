@@ -576,10 +576,12 @@ Ported from `gitpane/widgets/splitter.py`:
   columns, shrinks the diff pane by five, and keeps their total.
 - Minimums clamp in both directions.
 - Dragging the first sidebar splitter keeps the Commits section's height.
-- After a drag, resizing the terminal to 140×40, 80×24, and 60×20 keeps the
+- After a drag, resizing the terminal to 140×40, 80×24, and 60×21 keeps the
   proportions within rounding. The sidebar stays at least 15 columns, the diff
   pane at least 10, and every list at least 3 rows. The diff viewer can still
-  scroll in both directions, and wrapping still works.
+  scroll in both directions, and wrapping still works. Without a drag, the same
+  holds at 60×20. (After a drag, 60×20 can squeeze a section to its 3-row
+  minimum from 9.1, as in Python.)
 - The Files splitter resizes the tree and the preview the same way.
 - A hovered or dragged splitter renders differently from an idle one. Tests
   assert the difference, not a color value.
@@ -928,7 +930,8 @@ file).
   - Put the cursor back on the commit (or the parent commit of the file) it
     was on, by hash, and scroll it into view.
   - On a non-quiet refresh where both lists are empty and there are commits,
-    select the first commit and focus the tree.
+    select the first commit, expand it (loading its files), and focus the
+    tree.
 
 ### 11.5 Files and previews
 
