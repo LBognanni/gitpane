@@ -47,7 +47,6 @@ fn scrollbar_thumbs_share_one_blue_color() {
     let Color::Rgb(r, _, b) = thumb else {
         panic!("expected an RGB thumb, got {thumb:?}");
     };
-    // A light blue like the Python app's, not a grey.
     assert!(b > r.saturating_add(64), "{thumb:?}");
     let harness = files_tab("/repo", 40);
     let x = bar_column(&harness, 3);

@@ -171,7 +171,6 @@ fn focus_shows_in_the_highlighted_row_not_the_border() {
     harness.press(KeyCode::Down);
     harness.press(KeyCode::Tab);
     harness.press(KeyCode::Down);
-    // Like Python, the border keeps one color; the focused list's row stands out.
     assert_eq!(cell(&harness, (0, staged_row)).fg, border);
     assert_eq!(cell(&harness, (0, unstaged_row)).fg, border);
     assert_eq!(cell(&harness, (x, unstaged_row)).bg, focused_row);
@@ -705,7 +704,6 @@ fn shrinking_history_never_renders_a_blank_tree() {
     assert!(harness.find("Commit 1 ").is_some());
 }
 
-// test_app_builds_file_tree_from_launch_cwd_and_refreshes_both_views
 #[test]
 fn app_builds_file_tree_from_launch_cwd_and_refreshes_both_views() {
     let root = std::path::Path::new("/work/repository");

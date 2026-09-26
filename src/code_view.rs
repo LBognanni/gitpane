@@ -11,7 +11,6 @@ use crate::theme;
 
 const TAB: usize = 8;
 const WHEEL: usize = 3;
-/// Width of the vertical scrollbar, like Textual's default.
 const VBAR: u16 = 2;
 
 /// A (source row, character offset) position in the displayed row text.

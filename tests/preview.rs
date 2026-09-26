@@ -4,7 +4,6 @@ use common::{Harness, TempDir};
 use crossterm::event::KeyCode;
 use gitpane::code_view::scrollbar_click_target;
 
-// test_file_selection_shows_repository_relative_path
 #[test]
 fn file_selection_shows_repository_relative_path() {
     let dir = TempDir::new("preview-title");
@@ -24,7 +23,6 @@ fn file_selection_shows_repository_relative_path() {
     assert!(harness.screen().contains("answer = 42"));
 }
 
-// test_loaded_preview_uses_current_wrap_setting
 #[test]
 fn loaded_preview_uses_current_wrap_setting() {
     let dir = TempDir::new("preview-wrap");
@@ -47,7 +45,6 @@ fn loaded_preview_uses_current_wrap_setting() {
     );
 }
 
-// test_file_preview_scrollbar_track_click_jumps_to_clicked_position
 #[test]
 fn file_preview_scrollbar_track_click_jumps_to_clicked_position() {
     let dir = TempDir::new("preview-scrollbar");

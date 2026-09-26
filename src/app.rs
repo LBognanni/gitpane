@@ -926,7 +926,6 @@ impl App {
             && self.staged.entries.is_empty()
             && self.unstaged.entries.is_empty()
         {
-            // Selecting the first commit also expands it, like Textual's auto_expand.
             self.commits.cursor = Some(0);
             if self.tab == Tab::Changes {
                 self.focus = Focus::Commits;

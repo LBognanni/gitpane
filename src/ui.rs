@@ -91,7 +91,6 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     );
 }
 
-/// Textual-style tabs: padded labels over a `━` underline that highlights the active tab.
 fn render_tabs(app: &mut App, area: Rect, buf: &mut Buffer) {
     buf.set_style(area, Style::new().fg(theme::MUTED_TEXT).bg(theme::SURFACE));
     let mut x = area.x;
@@ -611,12 +610,9 @@ fn tree_rows(
     hits
 }
 
-/// Textual's Tree expand/collapse indicators.
 const EXPANDED: &str = "▼ ";
 const COLLAPSED: &str = "▶ ";
 
-/// Textual-style guide prefix (three cells per level) for each node of a
-/// depth-annotated preorder list, where depth 0 is the root.
 fn tree_guides(nodes: &[FileNode]) -> Vec<String> {
     // A node is last when no later sibling follows before its parent ends.
     let mut is_last = vec![false; nodes.len()];
@@ -844,14 +840,8 @@ fn render_discard(
     app.hits.push((discard, Target::ConfirmDiscard));
 }
 
-/// Textual's default button width.
 const BUTTON_WIDTH: u16 = 16;
 
-/// A Textual-style button in `area` (three rows): a bold centered label between
-/// a lighter `▔` top edge and a darker `▁` bottom edge. A default button is a
-/// `$surface` block, or a `$primary` one with a white label while focused. A
-/// `danger` (error variant) button stays red and lightens slightly while focused.
-/// Hovering lightens any button a little further, like Textual's `:hover`.
 fn dialog_button(
     label: &str,
     danger: bool,
@@ -911,7 +901,6 @@ fn render_file_jump(
     let (matches, truncated) = app.jump_matches();
     let top = area.y + 3;
     let available = area.bottom().saturating_sub(top);
-    // Like Python: a borderless three-row input, then at most height - 7 results.
     let visible = (matches.len() as u16)
         .min(area.height.saturating_sub(7))
         .min(available.saturating_sub(3 + truncated as u16));

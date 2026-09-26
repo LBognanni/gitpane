@@ -1,5 +1,3 @@
-//! Nerd Font labels for the Files tree, ported verbatim from `gitpane/icons.py`.
-
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
@@ -153,7 +151,6 @@ fn lookup(table: &[(&str, Icon)], key: &str) -> Option<Icon> {
         .map(|(_, icon)| *icon)
 }
 
-/// The final `.suffix` of `name`, like Python's `Path.suffix`.
 fn suffix(name: &str) -> &str {
     match name.rfind('.') {
         Some(dot) if dot > 0 && dot + 1 < name.len() => &name[dot..],
@@ -207,7 +204,6 @@ mod tests {
         out
     }
 
-    // test_file_label_selects_icons_by_name_then_extension
     #[test]
     fn file_label_selects_icons_by_name_then_extension() {
         for (name, expected) in [
@@ -221,7 +217,6 @@ mod tests {
         }
     }
 
-    // test_file_label_colors_only_the_icon_and_preserves_literal_name
     #[test]
     fn file_label_colors_only_the_icon_and_preserves_literal_name() {
         let label = file_label("[red]example.py");
@@ -229,7 +224,6 @@ mod tests {
         assert_eq!(styled(&label), [(0, 1, Color::Rgb(0xff, 0xbc, 0x03))]);
     }
 
-    // test_folder_label_uses_colored_open_and_closed_icons
     #[test]
     fn folder_label_uses_colored_open_and_closed_icons() {
         let closed = folder_label("[folder]", false);

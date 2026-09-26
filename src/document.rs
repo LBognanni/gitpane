@@ -296,7 +296,6 @@ index 1111111..2222222 100644
         colors
     }
 
-    // test_load_diff_view_prepares_visible_rows_and_change_positions
     #[test]
     fn diff_document_prepares_visible_rows_and_change_positions() {
         let doc = diff_document("module.py", PATCH);
@@ -323,7 +322,6 @@ index 1111111..2222222 100644
         assert!(style_at(&context, GUTTER_WIDTH).fg.is_some());
     }
 
-    // test_load_diff_view_reports_no_changes_for_an_all_context_patch
     #[test]
     fn diff_document_reports_no_changes_for_an_all_context_patch() {
         let doc = diff_document("notes.txt", &hunk(" context one\n context two\n"));
@@ -336,7 +334,6 @@ index 1111111..2222222 100644
         assert_eq!(doc.first_change(), None);
     }
 
-    // test_diff_rows_show_bracketed_source_literally
     #[test]
     fn diff_rows_show_bracketed_source_literally() {
         let doc = diff_document("notes.txt", &hunk("-[old]\n+[new] [/bold]\n"));
@@ -347,7 +344,6 @@ index 1111111..2222222 100644
         );
     }
 
-    // test_build_diff_view_shows_new_output_for_a_changed_patch
     #[test]
     fn diff_document_follows_the_patch_text() {
         let first = diff_document("module.py", &hunk("-a = 1\n+a = 2\n"));
@@ -357,7 +353,6 @@ index 1111111..2222222 100644
         assert!(plain(&second.line(1)).ends_with("a = 3"));
     }
 
-    // test_build_diff_view_shows_new_output_for_a_changed_entry
     #[test]
     fn diff_document_colors_follow_the_entry_path() {
         let patch = hunk("-value\n+value = 1\n");
@@ -370,7 +365,6 @@ index 1111111..2222222 100644
         assert_eq!(source_colors(&as_text.line(1)).len(), 1);
     }
 
-    // test_render_diff_rows_colors_source_by_filename_language
     #[test]
     fn diff_rows_color_source_by_filename_language() {
         for (path, source, colored_offset) in [
@@ -391,7 +385,6 @@ index 1111111..2222222 100644
         }
     }
 
-    // test_render_diff_rows_leaves_unrecognized_source_uncolored
     #[test]
     fn unknown_file_types_render_plain() {
         let doc = diff_document("notes.unknown", &hunk(" plain words\n"));
@@ -401,8 +394,6 @@ index 1111111..2222222 100644
         assert_eq!(source_colors(&line), [None]);
     }
 
-    // test_highlight_new_lines_retains_blank_lines_in_new_side_order
-    // test_reconstruct_new_source_keeps_only_new_side_text_and_whitespace
     #[test]
     fn new_side_keeps_blank_lines_and_order_for_highlighting() {
         let doc = diff_document(
@@ -423,8 +414,6 @@ index 1111111..2222222 100644
         assert!(style_at(&doc.line(3), GUTTER_WIDTH).fg.is_some());
     }
 
-    // test_render_diff_rows_shows_all_removals_as_removed_rows
-    // test_reconstruct_new_source_returns_empty_for_no_new_side
     #[test]
     fn all_removals_show_as_removed_rows_highlighted_from_the_old_side() {
         let doc = diff_document("removed.py", &hunk("-import os\n-x = 1\n"));
@@ -438,7 +427,6 @@ index 1111111..2222222 100644
         assert!(style_at(&doc.line(0), GUTTER_WIDTH).fg.is_some());
     }
 
-    // test_render_diff_rows_uses_plain_columns_and_full_width_change_backgrounds
     #[test]
     fn diff_rows_use_plain_columns_and_full_width_change_backgrounds() {
         let doc = diff_document(
@@ -461,7 +449,6 @@ index 1111111..2222222 100644
         assert_ne!(style_at(&removed, 0).bg, style_at(&added, 0).bg);
     }
 
-    // test_render_diff_rows_preserves_empty_rows
     #[test]
     fn diff_rows_preserve_empty_rows() {
         let doc = diff_document("empty.txt", &hunk(" \n"));
@@ -470,7 +457,6 @@ index 1111111..2222222 100644
         assert_eq!(style_at(&doc.line(0), 0), Style::new());
     }
 
-    // test_render_diff_rows_projects_syntax_onto_source_not_gutter
     #[test]
     fn syntax_colors_source_not_gutter_and_removed_rows_use_the_old_side() {
         let patch = "--- a/f\n+++ b/f\n@@ -20,2 +10,1 @@\n import os\n-import sys\n@@ -30,0 +30,1 @@\n+import re\n";
@@ -543,7 +529,6 @@ index 1111111..2222222 100644
         TempFile(path)
     }
 
-    // test_load_preview_view_builds_numbered_highlighted_lines
     #[test]
     fn preview_builds_numbered_highlighted_lines() {
         let doc = load_preview(&temp_file("example.py", b"answer = 42\n"));
@@ -570,7 +555,6 @@ index 1111111..2222222 100644
         colors
     }
 
-    // test_load_preview_view_preserves_logical_lines
     #[test]
     fn preview_preserves_logical_lines() {
         for (i, (source, expected)) in [
@@ -598,7 +582,6 @@ index 1111111..2222222 100644
         assert_eq!(doc.wrap_indent, 4);
     }
 
-    // test_load_preview_view_returns_friendly_messages
     #[test]
     fn preview_returns_friendly_messages() {
         let large = vec![b'x'; MAX_PREVIEW_BYTES as usize + 1];
@@ -620,7 +603,6 @@ index 1111111..2222222 100644
         }
     }
 
-    // test_load_preview_view_handles_disappeared_file
     #[test]
     fn preview_handles_disappeared_file() {
         let present = temp_file("present.txt", b"");
@@ -632,7 +614,6 @@ index 1111111..2222222 100644
         );
     }
 
-    // test_load_preview_view_handles_unreadable_file
     #[test]
     fn preview_handles_unreadable_file() {
         // A path below a regular file fails with "not a directory", whoever runs it.
@@ -642,7 +623,6 @@ index 1111111..2222222 100644
         assert_eq!(plains(&load_preview(&path)), ["File could not be read."]);
     }
 
-    // test_load_preview_view_rejects_non_regular_files
     #[test]
     fn preview_rejects_non_regular_files() {
         let target = temp_file("target.txt", b"outside the selected path");

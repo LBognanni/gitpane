@@ -11,7 +11,6 @@ fn index(paths: &[&str]) -> Vec<(String, String)> {
         .collect()
 }
 
-// test_matching_files_requires_three_characters_and_matches_case_insensitively
 #[test]
 fn matching_files_requires_three_characters_and_matches_case_insensitively() {
     let files = index(&["docs/Report.md", "src/reporting.py", "src/other.py"]);
@@ -22,7 +21,6 @@ fn matching_files_requires_three_characters_and_matches_case_insensitively() {
     assert_eq!(matching_files(&files, "REPO"), (expected, false));
 }
 
-// test_matching_files_reports_only_actual_truncation
 #[test]
 fn matching_files_reports_only_actual_truncation() {
     let names: Vec<String> = (0..100).map(|i| format!("match-{i}.txt")).collect();
@@ -48,7 +46,6 @@ fn type_text(harness: &mut Harness, text: &str) {
     }
 }
 
-// test_quick_file_jump_is_memory_backed_and_reveals_nested_file
 #[test]
 fn quick_file_jump_is_memory_backed_and_reveals_nested_file() {
     let dir = TempDir::new("file-jump");

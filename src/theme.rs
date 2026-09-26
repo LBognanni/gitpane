@@ -14,7 +14,6 @@ pub const ADDITION_BACKGROUND: Color = Color::from_u32(0x142b1d);
 pub const REMOVAL_BACKGROUND: Color = Color::from_u32(0x351b20);
 pub const DIFF_BACKGROUND: Color = Color::from_u32(0x272822);
 pub const DANGER: Color = Color::from_u32(0xff7b72);
-/// Textual's default primary, used for its tab underline and list highlight.
 pub const PRIMARY: Color = Color::from_u32(0x0178d4);
 
 /// Panel titles, viewer titles, and the status bar.
@@ -25,7 +24,5 @@ pub fn title() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-/// Scrollbar thumb: the Python app's `scrollbar-color: $accent`.
 pub const SCROLLBAR: Color = ACCENT;
-/// Scrollbar track: dark, like Textual's `background-darken-1`.
 pub const SCROLLBAR_BACKGROUND: Color = CANVAS;
