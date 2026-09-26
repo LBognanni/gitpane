@@ -195,6 +195,59 @@ fn resizing_keeps_usable_panes_and_scrolling() {
 }
 
 #[test]
+fn resizing_without_a_drag_keeps_usable_panes_and_scrolling() {
+    let mut harness = harness(100, 30);
+    harness
+        .app
+        .diff_view
+        .set_document(gitpane::document::diff_document("a.txt", &long_diff()));
+
+    for (width, height) in [(140, 40), (80, 24), (60, 20)] {
+        harness.resize(width, height);
+        let (sidebar, diff) = (sidebar_width(&harness), diff_width(&harness));
+        assert!(sidebar >= 15 && diff >= 10, "{width}x{height}");
+        for section in section_heights(&harness) {
+            // Each list (section minus its title row) keeps at least 3 rows.
+            assert!(section > 3, "{width}x{height}: {section}");
+        }
+        let view = harness.app.diff_view.viewport();
+        assert!(view.height > 0);
+        let (max_x, max_y) = harness.app.diff_view.max_scroll();
+        assert!(max_x > 0 && max_y > 0, "{width}x{height}");
+        // Both scrollbars take space beside the text, above the status bar.
+        assert!(view.right() < width, "vertical scrollbar {width}x{height}");
+        assert!(
+            view.bottom() < height - 1,
+            "horizontal scrollbar {width}x{height}"
+        );
+        // Both thumbs start at the scroll origin and share one color.
+        let buffer = harness.buffer();
+        let thumb = buffer[(view.right(), view.y)].bg;
+        assert_ne!(thumb, buffer[(view.x, view.y)].bg, "{width}x{height}");
+        assert_eq!(
+            buffer[(view.x, view.bottom())].bg,
+            thumb,
+            "{width}x{height}"
+        );
+    }
+
+    harness.press(KeyCode::Char('w'));
+    assert!(harness.app.diff_view.wrapped());
+    let view = &harness.app.diff_view;
+    assert_eq!(view.max_scroll().0, 0);
+    assert!(view.max_scroll().1 > 0);
+    assert!(view.virtual_size().0 <= view.viewport().width as usize);
+    // No horizontal scrollbar: the row below the text is the status bar.
+    let status_row = harness.buffer().area.height - 1;
+    assert_eq!(view.viewport().bottom(), status_row);
+
+    harness.resize(140, 40);
+    let view = &harness.app.diff_view;
+    assert_eq!(view.max_scroll().0, 0);
+    assert!(view.max_scroll().1 > 0);
+}
+
+#[test]
 fn tiny_terminals_never_panic() {
     let mut harness = harness(100, 30);
     let (x, y) = sidebar_splitter(&harness);

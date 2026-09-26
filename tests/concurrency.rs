@@ -151,6 +151,9 @@ fn superseded_history_results_are_never_displayed() {
     assert_eq!(screen.matches("Loading…").count(), 3);
 
     harness.send(newer);
+    // With both lists empty, the first commit is selected and loads its files.
+    let files = harness.run_history();
+    harness.send(files);
     let screen = harness.screen();
     assert!(screen.contains("Newer commit"), "{screen}");
     assert!(!screen.contains("Older commit"));

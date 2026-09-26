@@ -296,7 +296,13 @@ fn long_diff_title_keeps_navigation_visible_and_right_aligned() {
     assert_eq!(down, up + 3);
     // Right aligned: only the bar's one-cell padding follows the buttons.
     assert_eq!(31 + down + 2, 100 - 1);
-    // Navigation is enabled: the diff has a second change.
-    let cell = &harness.buffer()[(31 + down as u16, 1)];
-    assert!(!cell.modifier.contains(Modifier::DIM));
+    // Navigation is enabled: the diff has a second change. At the first
+    // change, the previous button is the disabled (dimmed) one.
+    let buffer = harness.buffer();
+    assert!(
+        !buffer[(31 + down as u16, 2)]
+            .modifier
+            .contains(Modifier::DIM)
+    );
+    assert!(buffer[(31 + up as u16, 2)].modifier.contains(Modifier::DIM));
 }

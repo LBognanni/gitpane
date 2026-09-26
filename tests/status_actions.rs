@@ -247,6 +247,81 @@ fn status_actions_support_single_bulk_and_confirmed_discard() {
 }
 
 #[test]
+fn row_unstage_button_unstages_its_file() {
+    let mut harness = Harness::new(Ok(state(&["staged.txt"], &["other.txt"])));
+    // The focused, highlighted staged row reveals its unstage action.
+    let row = row_of(&harness, "staged.txt");
+    let unstage = sidebar_glyph(&harness, row, '↓').expect("row unstage action");
+    *harness.git.status.lock().unwrap() = Ok(state(&[], &["other.txt", "staged.txt"]));
+    let start = harness.git.calls().len();
+    harness.click(unstage);
+    assert_eq!(
+        calls_since(&harness, start),
+        ["unstage staged.txt", "status /repo"]
+    );
+    // The refreshed lists show the file under Unstaged.
+    assert!(row_of(&harness, "staged.txt") > row_of(&harness, "Unstaged"));
+}
+
+#[test]
+fn row_discard_button_asks_before_discarding_its_file() {
+    let mut harness = Harness::new(Ok(state(&[], &["a.txt", "b.txt"])));
+    let row = row_of(&harness, "b.txt");
+    harness.hover(harness.at("b.txt"));
+    let discard = sidebar_glyph(&harness, row, '↶').expect("row discard action");
+    harness.hover(discard);
+    assert_eq!(harness.line(29).trim(), "Discard Changes");
+
+    let start = harness.git.calls().len();
+    harness.click(discard);
+    assert!(
+        harness
+            .screen()
+            .contains("Discard changes to 1 file? This cannot be undone.")
+    );
+    assert_eq!(
+        harness.git.calls().len(),
+        start,
+        "nothing runs before confirming"
+    );
+    harness.click(discard_button(&harness));
+    assert_eq!(
+        calls_since(&harness, start),
+        ["restore b.txt", "status /repo"]
+    );
+}
+
+#[test]
+fn bulk_stage_button_stages_the_checked_rows() {
+    let mut harness = Harness::new(Ok(state(&[], &["a.txt", "b.txt", "c.txt"])));
+    harness.press(KeyCode::Char(' '));
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Char(' '));
+
+    // Both title-bar actions show their hints while hovered.
+    let title = row_of(&harness, "Unstaged");
+    let stage = sidebar_glyph(&harness, title, '↑').expect("bulk stage");
+    let discard = sidebar_glyph(&harness, title, '↶').expect("bulk discard");
+    harness.hover(stage);
+    assert_eq!(harness.line(29).trim(), "Stage Selected Changes");
+    harness.hover(discard);
+    assert_eq!(harness.line(29).trim(), "Discard Selected Changes");
+
+    *harness.git.status.lock().unwrap() = Ok(state(&["a.txt", "c.txt"], &["b.txt"]));
+    let start = harness.git.calls().len();
+    harness.click(stage);
+    assert_eq!(
+        calls_since(&harness, start),
+        ["stage a.txt c.txt", "status /repo"]
+    );
+    // The refreshed lists show the staged files above Unstaged.
+    let unstaged = row_of(&harness, "Unstaged");
+    assert!(row_of(&harness, "a.txt") < unstaged);
+    assert!(row_of(&harness, "c.txt") < unstaged);
+}
+
+#[test]
 fn discard_dialog_keys_move_between_buttons_and_confirm() {
     let mut harness = Harness::new(Ok(state(&[], &["a.txt"])));
     harness.press(KeyCode::Char('d'));

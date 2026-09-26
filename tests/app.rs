@@ -1,13 +1,14 @@
 mod common;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::{Harness, TempDir, state};
+use common::{Harness, ROOT, TempDir, state};
 use crossterm::event::{KeyCode, KeyModifiers};
-use gitpane::app::{Event, Focus, Severity, Tab};
+use gitpane::app::{App, Effect, Event, Focus, Severity, Tab};
 use gitpane::git::GitError;
 use gitpane::model::{Commit, CommitFile};
-use gitpane::runtime::{claim_first_launch, default_marker};
+use gitpane::runtime::{self, claim_first_launch, default_marker};
 use gitpane::ui::format_commit_label;
 use ratatui::style::Modifier;
 
@@ -413,6 +414,16 @@ fn with_history(harness: &mut Harness, commits: &[Commit]) {
     harness.press(KeyCode::Char('r'));
 }
 
+/// How many times commit files were loaded.
+fn commit_file_loads(harness: &Harness) -> usize {
+    harness
+        .git
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("commit_files"))
+        .count()
+}
+
 #[test]
 fn format_commit_label_expands_gitmoji_and_places_hash_last() {
     for (subject, expected) in [
@@ -462,22 +473,14 @@ fn commit_selection_expands_files_and_file_selection_uses_shared_diff() {
     assert_eq!(harness.app.focus, Focus::Commits);
     assert!(harness.find("▼ Add history").is_some());
     assert!(harness.find("M [bold]report.txt").is_some());
-    let loads = |harness: &Harness| {
-        harness
-            .git
-            .calls()
-            .iter()
-            .filter(|call| call.starts_with("commit_files"))
-            .count()
-    };
-    assert_eq!(loads(&harness), 1);
+    assert_eq!(commit_file_loads(&harness), 1);
 
     // Clicking toggles; loaded files are kept.
     harness.click(harness.at("Add history"));
     assert!(harness.find("M [bold]report.txt").is_none());
     harness.click(harness.at("Add history"));
     assert!(harness.find("M [bold]report.txt").is_some());
-    assert_eq!(loads(&harness), 1);
+    assert_eq!(commit_file_loads(&harness), 1);
 
     // Selecting the file shows its historical diff in the shared pane.
     harness.click(harness.at("M [bold]report.txt"));
@@ -510,6 +513,10 @@ fn commit_tree_keys_move_expand_collapse_and_select() {
     );
     with_history(&mut harness, &[first, second]);
     assert_eq!(harness.app.focus, Focus::Commits);
+    // The selected first commit starts expanded; Left collapses it.
+    assert!(harness.find("▼ First").is_some());
+    harness.press(KeyCode::Left);
+    assert!(harness.find("▶ First").is_some());
 
     harness.press(KeyCode::Char('j'));
     harness.press(KeyCode::Right);
@@ -531,8 +538,8 @@ fn commit_tree_keys_move_expand_collapse_and_select() {
 #[test]
 fn commit_without_files_shows_an_inert_leaf() {
     let mut harness = Harness::new(Ok(state(&[], &[])));
+    // The only commit is selected and expanded; Enter on its leaf does nothing.
     with_history(&mut harness, &[commit("aaaaaaafull", "Empty")]);
-    harness.press(KeyCode::Enter);
     harness.press(KeyCode::Down);
     harness.press(KeyCode::Enter);
     assert!(harness.find("(no changed files)").is_some());
@@ -548,16 +555,70 @@ fn commit_without_files_shows_an_inert_leaf() {
 #[test]
 fn history_selects_the_first_commit_only_when_both_lists_are_empty() {
     let mut harness = Harness::new(Ok(state(&[], &["notes.txt"])));
-    with_history(&mut harness, &[commit("aaaaaaafull", "First")]);
+    let first = commit("aaaaaaafull", "First");
+    let second = commit("bbbbbbbfull", "Second");
+    for commit in [&first, &second] {
+        harness
+            .git
+            .commit_files
+            .lock()
+            .unwrap()
+            .insert(commit.hash.clone(), vec![commit_file(commit, "x.txt")]);
+    }
+    with_history(&mut harness, &[first]);
     assert_eq!(harness.app.focus, Focus::Unstaged);
     let (x, y) = harness.at("First");
     assert!(!harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+    assert!(harness.find("▶ First").is_some());
+    assert_eq!(commit_file_loads(&harness), 0);
 
+    // Selecting the first commit also expands it and loads its files.
     *harness.git.status.lock().unwrap() = Ok(state(&[], &[]));
-    with_history(&mut harness, &[commit("bbbbbbbfull", "Second")]);
+    with_history(&mut harness, &[second]);
     assert_eq!(harness.app.focus, Focus::Commits);
     let (x, y) = harness.at("Second");
     assert!(harness.buffer()[(x, y)].modifier.contains(Modifier::BOLD));
+    assert!(harness.find("▼ Second").is_some());
+    assert!(harness.find("M x.txt").is_some());
+    assert_eq!(commit_file_loads(&harness), 1);
+}
+
+/// Launch a fresh app against the harness's fake, as a new start would.
+fn relaunch(harness: &mut Harness) {
+    harness.app = App::new(PathBuf::from(ROOT), PathBuf::from(ROOT), false);
+    for effect in harness.app.start() {
+        if let Effect::Git(job) = effect {
+            let event = runtime::run_job(&harness.git, job);
+            harness.send(event);
+        }
+    }
+}
+
+#[test]
+fn manual_refresh_with_equal_history_keeps_the_commit_expanded() {
+    let mut harness = Harness::new(Ok(state(&[], &[])));
+    let first = commit("aaaaaaafull", "First");
+    let second = commit("bbbbbbbfull", "Second");
+    for commit in [&first, &second] {
+        harness
+            .git
+            .commit_files
+            .lock()
+            .unwrap()
+            .insert(commit.hash.clone(), vec![commit_file(commit, "x.txt")]);
+    }
+    *harness.git.commits.lock().unwrap() = Ok(vec![second, first]);
+
+    relaunch(&mut harness);
+    assert!(harness.find("▼ Second").is_some(), "{}", harness.screen());
+    assert!(harness.find("M x.txt").is_some());
+    assert!(harness.find("▶ First").is_some());
+    assert_eq!(commit_file_loads(&harness), 1);
+
+    harness.press(KeyCode::Char('r'));
+    assert!(harness.find("▼ Second").is_some(), "{}", harness.screen());
+    assert!(harness.find("M x.txt").is_some());
+    assert_eq!(commit_file_loads(&harness), 1);
 }
 
 #[test]
@@ -601,7 +662,7 @@ fn history_failure_shows_an_error_toast() {
 
 #[test]
 fn tree_ignores_keys_while_commit_files_load() {
-    let mut harness = Harness::new(Ok(state(&[], &[])));
+    let mut harness = Harness::new(Ok(state(&["working.txt"], &[])));
     let first = commit("aaaaaaafull", "First");
     let second = commit("bbbbbbbfull", "Second");
     harness
@@ -612,7 +673,7 @@ fn tree_ignores_keys_while_commit_files_load() {
         .insert(first.hash.clone(), vec![commit_file(&first, "a.txt")]);
     with_history(&mut harness, &[first, second]);
     harness.hold_history = true;
-    harness.press(KeyCode::Right);
+    harness.click(harness.at("First"));
     harness.press(KeyCode::Down);
     harness.press(KeyCode::Right);
     assert_eq!(harness.held_history.len(), 1);
@@ -620,13 +681,7 @@ fn tree_ignores_keys_while_commit_files_load() {
     let files = harness.run_history();
     harness.send(files);
     assert!(harness.find("M a.txt").is_some());
-    let loads = harness
-        .git
-        .calls()
-        .iter()
-        .filter(|c| c.starts_with("commit_files"))
-        .count();
-    assert_eq!(loads, 1);
+    assert_eq!(commit_file_loads(&harness), 1);
 }
 
 #[test]

@@ -899,10 +899,11 @@ impl App {
         })]
     }
 
-    /// Apply loaded commits; an unchanged list keeps the tree exactly.
-    fn apply_history(&mut self, commits: Vec<Commit>, quiet: bool) {
+    /// Apply loaded commits; an unchanged list keeps the tree exactly. Returns the
+    /// file load of the first commit when a non-quiet load selects it.
+    fn apply_history(&mut self, commits: Vec<Commit>, quiet: bool) -> Vec<Effect> {
         if self.applied_commits.as_ref() == Some(&commits) {
-            return;
+            return Vec::new();
         }
         let target = self.commits.cursor_hash();
         // Drop pending commit-file loads.
@@ -925,11 +926,14 @@ impl App {
             && self.staged.entries.is_empty()
             && self.unstaged.entries.is_empty()
         {
+            // Selecting the first commit also expands it, like Textual's auto_expand.
             self.commits.cursor = Some(0);
             if self.tab == Tab::Changes {
                 self.focus = Focus::Commits;
             }
+            return self.set_expanded(0, true);
         }
+        Vec::new()
     }
 
     /// Expand or collapse commit `index`, loading its files on first expansion.
@@ -1284,7 +1288,7 @@ impl App {
                         if quiet {
                             self.failing.retain(|s| *s != Streak::History);
                         }
-                        self.apply_history(commits, quiet);
+                        return self.apply_history(commits, quiet);
                     }
                     Err(error) if quiet => self.auto_failure(Streak::History, &error),
                     Err(error) => self.git_error("refresh history", &error),

@@ -829,4 +829,13 @@ fn quiet_history_never_selects_the_first_commit_or_moves_focus() {
     assert!(has(&harness, "first"));
     assert_eq!(harness.app.commits.cursor, None);
     assert_eq!(harness.app.focus, focus);
+    // A quiet load leaves the first commit collapsed and loads no files.
+    assert!(has(&harness, "▶ first"));
+    assert!(
+        !harness
+            .git
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("commit_files"))
+    );
 }
