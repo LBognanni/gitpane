@@ -17,6 +17,16 @@ if ! grep -q 'gitpane-workspace' ~/.bashrc; then
   echo "[ -n \"\${SSH_CONNECTION:-}\" ] && cd '$PWD' # gitpane-workspace" >> ~/.bashrc
 fi
 
+# Fall back to a widely known terminal type when the client's is unknown here.
+if ! grep -q 'gitpane-term' ~/.bashrc; then
+  echo 'infocmp "$TERM" >/dev/null 2>&1 || export TERM=xterm-256color # gitpane-term' >> ~/.bashrc
+fi
+
+# SSH forwards the client's locale; fall back to C.UTF-8 when it is not installed.
+if ! grep -q 'gitpane-locale' ~/.bashrc; then
+  echo '[ "$(LC_ALL=${LANG:-C} locale charmap 2>/dev/null)" = UTF-8 ] || { unset $(env | grep -o "^LC_[A-Z]*"); export LANG=C.UTF-8; } # gitpane-locale' >> ~/.bashrc
+fi
+
 git config --global --add safe.directory '*'
 
 # Docker creates a new cargo registry volume owned by root.
