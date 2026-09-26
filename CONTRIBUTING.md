@@ -39,9 +39,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-The testing rules are in [AGENTS.md](AGENTS.md), and the design and behavior
-spec is [docs/rust.md](docs/rust.md). Commit messages use
-[gitmoji](https://gitmoji.dev/).
+[docs/design-spec.md](docs/design-spec.md) describes the design and how the
+code is organized, and the testing rules are in [AGENTS.md](AGENTS.md). Commit
+messages use [gitmoji](https://gitmoji.dev/).
 
 ## Releasing
 

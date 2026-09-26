@@ -88,7 +88,7 @@ impl Action {
     }
 }
 
-/// An icon button; see section 10.4.
+/// An icon button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     PreviousChange,

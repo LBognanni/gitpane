@@ -1,4 +1,4 @@
-//! Splitter weights and pane sizing; see section 9.
+//! Splitter weights and pane sizing.
 
 /// Initial width of the sidebar and the Files tree.
 pub const SIDE_WIDTH: u16 = 30;

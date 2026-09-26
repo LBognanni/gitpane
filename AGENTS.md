@@ -18,4 +18,4 @@
 
 ## Project context
 
-- Read `docs/rust.md` (the Rust spec), `docs/milestones.md`, `docs/design-spec.md`, or `docs/workflow.md` only when the task concerns their spec, milestone, design, or workflow.
+- Read `docs/milestones.md`, `docs/design-spec.md`, or `docs/workflow.md` only when the task concerns their milestone, design, or workflow.
