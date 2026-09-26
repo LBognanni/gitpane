@@ -1400,6 +1400,27 @@ reports failures once per streak.
 grep -rnE "uv run|pytest|textual" --exclude-dir=docs --exclude-dir=target --exclude-dir=.git .
 ```
 
+**Completion notes**
+
+- Parity audit: 176 of the 181 Python tests map to Rust tests. Two gaps were
+  fixed in RS-S12a: the first commit now expands at startup when both lists
+  are empty, and the 60×20 no-drag resize case gained a test. Three tests no
+  longer apply:
+  - `test_diff.py::test_main_prints_summary`: a `python -m gitpane.diff` debug
+    entry point; the Rust binary's only option is `--version`.
+  - `test_diff_rendering.py::test_build_diff_view_renders_an_identical_entry_and_patch_once`:
+    the render cache is gone (section 2, "Diff cache"). Its visible effect is
+    covered by `quiet_reload_of_an_equal_diff_leaves_the_document_untouched`.
+  - `test_auto_refresh.py::test_unmount_cancels_watcher_and_refresh`: Textual
+    task cancellation; the Rust loop returns on quit without a teardown phase.
+- All 17 README controls are covered by tests. RS-S12a added the row `↓`, row
+  `↶`, and bulk `↑` clicks and hints. The README controls table now lists every
+  Rust control.
+- The devcontainer opens the main checkout. The SSH key is generated at
+  `<repo>/.devcontainer/.ssh/id_ed25519`, so the host `~/.ssh/config`
+  `IdentityFile` for `gitpane-dev` moves there from the worktree path in
+  section 3.2.
+
 ## 14. Estimate
 
 About 4,500–5,500 lines of Rust and 4,000–5,000 lines of tests. That is roughly
@@ -1412,7 +1433,7 @@ rewrite, is among the simpler parts.
 
 | Story | Status | Depends on | Primary deliverable |
 | --- | --- | --- | --- |
-| RS-S0 — Devcontainer environment | Not started | — | Worktree-safe devcontainer with SSH and Claude Code |
+| RS-S0 — Devcontainer environment | Done | — | Worktree-safe devcontainer with SSH and Claude Code |
 | RS-S1 — Cargo scaffold | Done | RS-S0 | Event loop, tabs, status bar, quality gates |
 | RS-S2 — Git adapter | Done | RS-S1 | `GitApi`, `CliGit`, parsers, adapter tests |
 | RS-S3 — Diff and highlighting | Done | RS-S2 | Parser, tree-sitter viewport highlighting, documents |
@@ -1424,4 +1445,5 @@ rewrite, is among the simpler parts.
 | RS-S9 — History | Done | RS-S8 | Commit tree and historical diffs |
 | RS-S10 — Files tab | Done | RS-S9 | Files tree, preview, file jump |
 | RS-S11 — Automatic refresh | Done | RS-S10 | Watcher and quiet reconciliation |
-| RS-S12 — Cutover | Not started | RS-S11 | Python removed, docs updated, merged |
+| RS-S12a — Parity gaps | Done | RS-S11 | First-commit expansion, missing control and resize tests |
+| RS-S12 — Cutover | Done, merge pending | RS-S12a | Python removed, docs updated, merged |
