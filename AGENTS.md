@@ -7,16 +7,15 @@
 ## Testing
 
 - Test observable outcomes at the narrowest stable boundary that expresses the requirement. A pure function's return value and a Git adapter's generated command are outcomes at their respective boundaries.
-- Mock the Git adapter in application tests for speed and determinism. Use realistic status, history, file, and diff responses, then assert resulting UI state rather than internal application calls.
-- Do not test Git's own behavior or invoke real repositories when a mocked adapter proves the application behavior.
-- Tests in `tests/test_git.py` may assert command arguments and adapter results. These protect path safety, repository scope, porcelain usage, and command semantics without testing Git itself.
-- Prefer visible text, rendered output, computed styles, focus, enabled state, scrolling, copied text, notifications, and adapter calls over private fields, request tokens, object identity, storage layout, or helper call order.
-- Never test presentation by parsing TCSS files or asserting literal color codes. Mount the component, put it in the relevant state, and assert its rendered or computed appearance.
-- Rich spans and rendered strips may be inspected when styling is the behavior, but assert only the smallest meaningful visual contract rather than duplicating exact internal span layouts.
-- Test caching, virtualization, and threading only when they support an explicit behavioral or concurrency requirement. Assert the requirement, not incidental implementation mechanics.
-- Organize test files by product behavior, not production methods or classes. Keep complete user workflows together, keep files focused, and move fixtures to `conftest.py` only when multiple test modules genuinely share them.
-- Keep `tests/test_code_view.py` as the `CodeView` component boundary. Do not fold widget internals into application workflow tests.
+- Application and workflow tests use `FakeGit` (`tests/common/mod.rs`) with realistic status, history, file, and diff responses, then assert the resulting rendered state. Do not invoke real repositories.
+- Adapter tests in `src/git.rs` use the recording `Runner` and may assert argv, working directory, environment, allowed exit codes, parsed results, and error text. These protect path safety, repository scope, porcelain usage, and command semantics without testing Git itself.
+- Prefer the rendered `TestBackend` buffer (visible text, and cell styles when styling is the behavior), focus, enabled or dimmed buttons, scrolling, copied text, toasts, and `FakeGit` calls over private fields, request tokens, object identity, or helper call order.
+- Never assert literal colors. Render the component in the relevant state and compare cells, for example "keyword cells differ from plain cells".
+- Test caching, virtualization, and threading only when they support an explicit behavioral or concurrency requirement. Assert the requirement, not incidental implementation mechanics. The one performance contract is that rows materialized per draw stay bounded by the viewport height.
+- Unit and component tests live in `#[cfg(test)]` modules next to the code. Workflow tests go in `tests/*.rs`, organized by product behavior; keep complete user workflows together and files focused. Put shared support in `tests/common/mod.rs` only when at least two test files need it.
+- Keep the `src/code_view.rs` tests as the `CodeView` component boundary. Do not fold widget internals into workflow tests.
+- Quality gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## Project context
 
-- Read `docs/milestones.md`, `docs/design-spec.md`, or `docs/workflow.md` only when the task concerns their milestone, design, or workflow.
+- Read `docs/rust.md` (the Rust spec), `docs/milestones.md`, `docs/design-spec.md`, or `docs/workflow.md` only when the task concerns their spec, milestone, design, or workflow.

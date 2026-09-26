@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Set up SSH access and the shell inside the container. Runs in the worktree.
+# Set up SSH access and the shell inside the container. Runs in the workspace folder.
 set -euo pipefail
 
 key=.devcontainer/.ssh/id_ed25519

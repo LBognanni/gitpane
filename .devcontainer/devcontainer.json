@@ -2,9 +2,10 @@
   "name": "gitpane-rust",
   "build": { "dockerfile": "Dockerfile" },
   // up.sh passes the MAIN repository root as the workspace folder. Mount it at
-  // its host path so the worktree's absolute .git pointer resolves.
+  // its host path so worktrees' absolute .git pointers resolve, and open the
+  // main checkout.
   "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
-  "workspaceFolder": "${localWorkspaceFolder}/.claude/worktrees/rust-rewrite",
+  "workspaceFolder": "${localWorkspaceFolder}",
   "remoteUser": "vscode",
   "features": {
     "ghcr.io/devcontainers/features/sshd:1": {}

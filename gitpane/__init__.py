@@ -1,1 +1,0 @@
-"""GitPane package."""

@@ -243,7 +243,7 @@ fn hovering_the_close_button_lightens_it() {
 }
 
 #[test]
-fn close_button_is_a_three_row_textual_button() {
+fn close_button_is_a_solid_three_row_block_clickable_on_its_edges() {
     let mut harness = Harness::with(Ok(state(&[], &[])), true, 100, 30);
     let (x, y) = harness.at("Close");
     // Sixteen cells wide with the label centred between a ▔ top and ▁ bottom edge.
