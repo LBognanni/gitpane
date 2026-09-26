@@ -1416,6 +1416,8 @@ grep -rnE "uv run|pytest|textual" --exclude-dir=docs --exclude-dir=target --excl
 - All 17 README controls are covered by tests. RS-S12a added the row `↓`, row
   `↶`, and bulk `↑` clicks and hints. The README controls table now lists every
   Rust control.
+- The README stays user-facing. Setup, quality gates, and releasing (including
+  betas) live in `CONTRIBUTING.md`.
 - The devcontainer opens the main checkout. The SSH key is generated at
   `<repo>/.devcontainer/.ssh/id_ed25519`, so the host `~/.ssh/config`
   `IdentityFile` for `gitpane-dev` moves there from the worktree path in
