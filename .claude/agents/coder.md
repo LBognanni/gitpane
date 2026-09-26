@@ -1,8 +1,8 @@
 ---
 name: coder
 description: Use for routine implementation work — writing or editing code to a given spec, fixing bugs, adding small features. Default choice for "just implement this" tasks.
-model: sonnet
-reasoningEffort: medium
+model: opus
+reasoningEffort: low
 tools: Bash, Glob, Grep, Read, Edit, Write, NotebookEdit, WebFetch, WebSearch, TodoWrite, BashOutput, KillShell, AskUserQuestion, Skill
 ---
 
